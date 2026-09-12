@@ -103,6 +103,12 @@ Direction is `contract ← identity ← providers ← core ← apps`, and **noth
 including the other app. Enforced by `npm run boundaries`, the analogue of the Android app's
 Konsist `ModuleBoundaryTest`.
 
+## New here?
+
+**[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** is the onboarding doc: the request lifecycle
+end to end, language/framework choices and why, the module graph, and a "things that will trip you
+up" list. Start there before making a change.
+
 ## The rules that matter
 
 Read [`CLAUDE.md`](CLAUDE.md) first; it is the short version. The long version is in `docs/adr/`:
@@ -112,6 +118,7 @@ Read [`CLAUDE.md`](CLAUDE.md) first; it is the short version. The long version i
 - [0003](docs/adr/0003-no-raw-imei-at-rest.md) — no raw IMEI at rest, in a log, or in telemetry
 - [0004](docs/adr/0004-cache-at-the-field-level.md) — cache fields, not responses, asymmetric TTLs
 - [0005](docs/adr/0005-tac-data-licensing.md) — Osmocom with attribution, no bulk endpoint
+- [0006](docs/adr/0006-domain-lives-in-packages-core.md) — the domain lives in `packages/core`, not `apps/api`
 
 Two you can break by accident, so they are tested rather than documented:
 
