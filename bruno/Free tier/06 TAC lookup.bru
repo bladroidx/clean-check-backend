@@ -1,0 +1,32 @@
+meta {
+  name: TAC lookup
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseUrl}}/v1/tac/{{knownTac}}
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+  res.body.manufacturer: eq Apple
+}
+
+tests {
+  test("carries its source version and attribution", function () {
+    // CC BY-SA requires the credit, and a result whose provenance cannot be named is not evidence.
+    expect(res.getBody().source_version).to.be.a("string");
+    expect(res.getBody().attribution).to.be.a("string");
+  });
+}
+
+docs {
+  One TAC, by design.
+
+  There is no list, no wildcard and no pagination. Serving individual facts is not distributing the
+  compilation; serving the compilation is, and that would hard-trigger CC-BY-SA ShareAlike across
+  the whole dataset. See `docs/adr/0005-tac-data-licensing.md`.
+}

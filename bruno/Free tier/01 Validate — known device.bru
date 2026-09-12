@@ -1,0 +1,58 @@
+meta {
+  name: Validate — known device
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/v1/imei/validate
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "imei": "{{validImei}}"
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.subject.luhn_valid: eq true
+  res.body.identity.outcome: eq pass
+}
+
+tests {
+  test("never returns the full IMEI", function () {
+    // The whole point of a theft check is that it matters who holds the number.
+    expect(JSON.stringify(res.getBody())).to.not.include(bru.getEnvVar("validImei"));
+    expect(res.getBody().subject.imei_masked).to.match(/^\d{2}•{11}\d{2}$/);
+  });
+
+  test("a pass carries the evidence that produced it", function () {
+    // A pass with no numbers behind it is indistinguishable from a check that silently did nothing.
+    const labels = res.getBody().identity.evidence.map((e) => e.label);
+    expect(labels).to.include.members(["Manufacturer", "Model"]);
+  });
+
+  test("every section states what it covers and when", function () {
+    const s = res.getBody().identity;
+    expect(s.coverage.caveats.length).to.be.above(0);
+    expect(s.coverage.source_version).to.be.a("string");
+    expect(Date.parse(s.checked_at)).to.not.be.NaN;
+  });
+
+  test("the disclaimer is present", function () {
+    expect(res.getBody().disclaimer).to.include("not proof");
+  });
+}
+
+docs {
+  The happy path. Note what it does **not** claim: Luhn validity plus a TAC match means the number
+  is well-formed and the model is plausible. It says nothing about lost or stolen — that is
+  `blacklist.gsma`, which lands in M1.
+}

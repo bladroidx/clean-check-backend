@@ -1,0 +1,28 @@
+meta {
+  name: Attributions
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/v1/attributions
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("every data source names its licence", function () {
+    for (const s of res.getBody().sources) {
+      expect(s.version, `${s.name} has no version`).to.be.a("string");
+    }
+  });
+}
+
+docs {
+  Where the data came from. Half of the CC-BY-SA attribution obligation; the other half is
+  `coverage.attribution` on every identity answer.
+}

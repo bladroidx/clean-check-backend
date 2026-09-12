@@ -1,0 +1,35 @@
+meta {
+  name: Validate — dual-SIM clipboard
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/v1/imei/validate
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "imei": "IMEI (slot 1): {{validImei}}\nIMEI (slot 2): {{secondSimImei}}"
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.subject.luhn_valid: eq true
+  res.body.subject.tac: eq "{{knownTac}}"
+}
+
+docs {
+  What a dialer actually puts on the clipboard: labels, two numbers, a newline.
+
+  Slot one wins — it is the number printed on the box. The parser looks for an unbroken 15-digit
+  run **first**, because stripping every non-digit would weld the `1` out of "slot 1" onto the
+  front and then read the wrong fifteen digits with total confidence.
+}

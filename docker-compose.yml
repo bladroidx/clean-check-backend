@@ -1,0 +1,44 @@
+# Development stack. The mock-provider container lands in M1 so the whole thing stays exercisable
+# without spending a credit.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: imei
+      POSTGRES_PASSWORD: imei
+      POSTGRES_DB: imei_check
+    ports: ['5432:5432']
+    volumes: ['pgdata:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U imei -d imei_check']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Migrations run as their own step, never on app boot: N replicas racing dbmate is a bad
+  # afternoon.
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://imei:imei@postgres:5432/imei_check?sslmode=disable
+    volumes: ['./db:/db']
+    command: ['--wait', 'up']
+
+  api:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    environment:
+      NODE_ENV: development
+      PORT: '3000'
+      LOG_LEVEL: info
+      # Development value only. Production reads this from the platform secret store.
+      SERVER_PEPPER: dev-pepper-not-for-production-0123456789
+      DATABASE_URL: postgres://imei:imei@postgres:5432/imei_check?sslmode=disable
+    ports: ['3000:3000']
+
+volumes:
+  pgdata:

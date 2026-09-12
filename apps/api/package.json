@@ -1,0 +1,22 @@
+{
+  "name": "@imei-check/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^9.4.0",
+    "@fastify/swagger-ui": "^6.1.1",
+    "@imei-check/contract": "*",
+    "@imei-check/identity": "*",
+    "fastify": "^5.2.0",
+    "fastify-type-provider-zod": "^4.0.2",
+    "pino": "^9.5.0",
+    "zod": "^3.24.1"
+  }
+}

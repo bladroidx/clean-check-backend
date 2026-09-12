@@ -1,0 +1,13 @@
+{
+  "version": "seed-2026-09-12",
+  "source": "bundled",
+  "attribution": "Seed data for development. Replace with an Osmocom import (CC BY-SA 3.0) before any real use — see docs/adr/0005-tac-data-licensing.md.",
+  "entries": {
+    "35310411": { "manufacturer": "Apple", "model": "iPhone 13", "marketingName": "iPhone 13" },
+    "35692005": { "manufacturer": "Apple", "model": "iPhone 12 Pro", "marketingName": "iPhone 12 Pro" },
+    "35847191": { "manufacturer": "Samsung", "model": "SM-G991B", "marketingName": "Galaxy S21" },
+    "86124503": { "manufacturer": "Xiaomi", "model": "M2101K6G", "marketingName": "Redmi Note 10 Pro" },
+    "35211308": { "manufacturer": "Google", "model": "GD1YQ", "marketingName": "Pixel 6" },
+    "01326300": { "manufacturer": "Motorola", "model": "XT2201-4", "marketingName": "Edge 30" }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "imei-check",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --force && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:sentinel": "vitest run apps/api/test/sentinel.test.ts",
+    "test:integration": "echo 'NOT_IMPLEMENTED: testcontainers suite lands with the database in M1' && exit 0",
+    "api:test": "cd bruno && bru run --env Local -r",
+    "schema:emit": "npm -w @imei-check/contract run schema:emit",
+    "schema:diff": "node scripts/schema-diff.mjs",
+    "lint": "eslint . --max-warnings 0",
+    "boundaries": "depcruise --config .dependency-cruiser.cjs packages apps",
+    "dev": "npm -w @imei-check/api run dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@usebruno/cli": "^4.1.0",
+    "@vitest/coverage-v8": "^5.0.0",
+    "dependency-cruiser": "^17.4.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.0"
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "$comment": "Golden vectors shared by imei-check (packages/identity) and check-this-phone (core/identity). Both must iterate this file. Regenerate BOTH sides on any change.",
+  "salt": "test-pepper",
+  "cases": [
+    {
+      "raw": "353104112345676",
+      "kind": "valid",
+      "digits": "353104112345676",
+      "tac": "35310411",
+      "masked": "35•••••••••••76",
+      "sha256_salted": "6a326dc4932624421c2c2508959ee41fe83561f7100b3520bb919740df1ca94c"
+    },
+    {
+      "raw": "IMEI 353104112345676",
+      "kind": "valid",
+      "digits": "353104112345676"
+    },
+    {
+      "raw": "IMEI (slot 1): 353104112345676\nIMEI (slot 2): 356920051234564",
+      "kind": "valid",
+      "digits": "353104112345676",
+      "note": "slot one wins - it is the number printed on the box"
+    },
+    {
+      "raw": "353 - 104 - 112 - 345 - 676",
+      "kind": "valid",
+      "digits": "353104112345676",
+      "note": "grouped with spaces and dashes"
+    },
+    {
+      "raw": "35310/41123/45676",
+      "kind": "valid",
+      "digits": "353104112345676",
+      "note": "grouped with slashes"
+    },
+    {
+      "raw": "353104112345676",
+      "kind": "valid",
+      "digits": "353104112345676",
+      "note": "computed check digit must validate"
+    },
+    {
+      "raw": "861245031111114",
+      "kind": "valid",
+      "digits": "861245031111114",
+      "note": "computed check digit must validate"
+    },
+    {
+      "raw": "000000000000000",
+      "kind": "valid",
+      "digits": "000000000000000",
+      "note": "computed check digit must validate"
+    },
+    {
+      "raw": "353105112345676",
+      "kind": "checksum_failed",
+      "masked": "35•••••••••••76",
+      "given": 6,
+      "note": "one digit mistyped"
+    },
+    {
+      "raw": "353014112345676",
+      "kind": "checksum_failed",
+      "masked": "35•••••••••••76",
+      "given": 6,
+      "note": "adjacent transposition"
+    },
+    {
+      "raw": "no digits here",
+      "kind": "nothing_numeric"
+    },
+    {
+      "raw": "",
+      "kind": "nothing_numeric",
+      "note": "empty is nothing_numeric, never a checksum failure"
+    },
+    {
+      "raw": "12345",
+      "kind": "wrong_length",
+      "digitsFound": 5
+    },
+    {
+      "raw": "3531041123456789012",
+      "kind": "wrong_length",
+      "digitsFound": 19
+    }
+  ]
+}

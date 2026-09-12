@@ -1,0 +1,17 @@
+docs {
+  # imei-check — local API collection
+
+  Point at a running server (`npm run dev`) and hit **Run** on any request.
+
+  Every request carries assertions, so this collection is not just a set of examples — it is an
+  executable check of the rules the service must never break:
+
+  - an unknown TAC is `inconclusive`, never `pass`
+  - no response ever contains the full 15-digit IMEI
+  - every section carries `coverage`, `checked_at` and its evidence
+  - `/readyz` never depends on a provider
+
+  Test IMEIs live in the **Local** environment as variables, so no request file contains a
+  15-digit number. That is deliberate: `apps/api/test/sentinel.test.ts` greps the whole repo for
+  them.
+}

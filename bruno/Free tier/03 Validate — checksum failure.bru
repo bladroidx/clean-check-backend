@@ -1,0 +1,44 @@
+meta {
+  name: Validate — checksum failure
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/v1/imei/validate
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "imei": "{{checksumFailImei}}"
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.parse.kind: eq checksum_failed
+  res.body.subject.luhn_valid: eq false
+}
+
+tests {
+  test("names which digit is wrong", function () {
+    // The error a person makes copying fifteen digits off a screen while someone waits.
+    const p = res.getBody().parse;
+    expect(p.expected_check_digit).to.not.equal(p.given_check_digit);
+  });
+
+  test("a rejected number is still masked, never echoed in full", function () {
+    expect(JSON.stringify(res.getBody())).to.not.include(bru.getEnvVar("checksumFailImei"));
+  });
+}
+
+docs {
+  One mistyped digit. Distinguished from "wrong length" and "nothing numeric" because the three
+  problems need three different sentences — "invalid IMEI" tells the user nothing.
+}

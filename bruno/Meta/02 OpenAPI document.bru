@@ -1,0 +1,32 @@
+meta {
+  name: OpenAPI document
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/openapi.json
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("publishes the documented paths", function () {
+    const paths = Object.keys(res.getBody().paths);
+    expect(paths).to.include.members(["/v1/imei/validate", "/v1/tac/{tac}"]);
+  });
+
+  test("no real IMEI in a published example", function () {
+    // Examples are published output. A real 15-digit number pasted into one is a leak.
+    expect(JSON.stringify(res.getBody())).to.not.match(/\b\d{15}\b/);
+  });
+}
+
+docs {
+  Generated from the same zod definitions the server validates with. Browse it at
+  [/docs]({{baseUrl}}/docs).
+}

@@ -1,0 +1,54 @@
+meta {
+  name: Validate — unknown TAC
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/v1/imei/validate
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "imei": "{{unknownTacImei}}"
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.subject.luhn_valid: eq true
+  res.body.identity.outcome: eq inconclusive
+  res.body.identity.reason: eq device_not_found_in_registry
+}
+
+tests {
+  test("an unknown TAC is inconclusive, NEVER pass", function () {
+    // The directory not knowing a model is not evidence that the number is fine. This is the
+    // single assertion the product's credibility rests on.
+    expect(res.getBody().identity.outcome).to.not.equal("pass");
+  });
+
+  test("inconclusive always carries a remedy", function () {
+    // An inconclusive that does not say what to do is a dead end, and a dead end reads to a buyer
+    // exactly like a failure.
+    expect(res.getBody().identity.remedy).to.be.a("string");
+  });
+
+  test("coverage is present even when we could not answer", function () {
+    expect(res.getBody().identity.coverage).to.be.an("object");
+  });
+}
+
+docs {
+  A well-formed number whose model we cannot identify.
+
+  The interesting part is what this is **not**: it is not a `pass`, and it is not a 404. We asked
+  the directory and got a non-answer, which is `inconclusive`. Had we been unable to ask at all,
+  it would be `unavailable`.
+}

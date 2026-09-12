@@ -1,0 +1,23 @@
+meta {
+  name: TAC not found
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/v1/tac/{{unknownTac}}
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 404
+  res.body.error.code: eq tac_not_found
+}
+
+docs {
+  A 404 here is correct: this endpoint answers "what is this TAC", and the resource genuinely does
+  not exist. Contrast the validate endpoint, where the same missing row is `inconclusive` inside a
+  200 — there the question is "is this phone clean", and a 4xx would read to a naive client as
+  "nothing wrong found".
+}

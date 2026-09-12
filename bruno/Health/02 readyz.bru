@@ -1,0 +1,30 @@
+meta {
+  name: readyz
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/readyz
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+  res.body.status: eq ready
+}
+
+tests {
+  test("readiness never depends on a provider", function () {
+    // A supplier outage is a SectionResult, not an outage of this service. Wiring providers into
+    // readiness makes the orchestrator restart healthy pods during someone else's incident.
+    const keys = Object.keys(res.getBody().checks);
+    expect(keys.some((k) => /provider|upstream|supplier/i.test(k))).to.equal(false);
+  });
+}
+
+docs {
+  Readiness. Fails on our own dependencies only — the database being unreachable, or migrations
+  being behind. Never on a provider.
+}

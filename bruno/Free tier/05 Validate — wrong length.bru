@@ -1,0 +1,32 @@
+meta {
+  name: Validate — wrong length
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/v1/imei/validate
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "imei": "12345"
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.parse.kind: eq wrong_length
+  res.body.parse.digits_found: eq 5
+}
+
+docs {
+  Reported distinctly from "nothing numeric": one is a retry with more digits, the other is a
+  retry with any digits at all.
+}
