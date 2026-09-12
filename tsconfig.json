@@ -1,8 +1,23 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/contract" },
-    { "path": "./packages/identity" },
-    { "path": "./apps/api" }
+    {
+      "path": "./packages/contract"
+    },
+    {
+      "path": "./packages/identity"
+    },
+    {
+      "path": "./packages/providers"
+    },
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./apps/api"
+    },
+    {
+      "path": "./apps/worker"
+    }
   ]
 }

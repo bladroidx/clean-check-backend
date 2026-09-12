@@ -170,6 +170,72 @@ export const ValidateResponse = z.object({
 });
 export type ValidateResponse = z.infer<typeof ValidateResponse>;
 
+/**
+ * The paid check request.
+ *
+ * `capabilities` is optional and defaults to everything the device supports, because the common
+ * case is "tell me about this phone" and making a caller enumerate our vocabulary to get an answer
+ * is a bad first experience. `max_age_seconds: 0` bypasses the cache at full price -- without that
+ * escape hatch the freshness promise in `coverage` would be unfalsifiable.
+ */
+export const CheckRequest = z.object({
+  imei: z.string().min(1).max(200),
+  capabilities: z.array(Capability).min(1).optional(),
+  max_age_seconds: z.number().int().nonnegative().optional(),
+  /** Hard ceiling the caller sets on this one check. Never exceeded, even for a partial answer. */
+  max_credits: z.number().int().nonnegative().optional(),
+});
+export type CheckRequest = z.infer<typeof CheckRequest>;
+
+/** What is checkable for a given device, and what it costs, BEFORE committing any credits. */
+export const CapabilitiesResponse = z.object({
+  schema_version: z.string(),
+  subject: Subject,
+  capabilities: z.array(
+    z.object({
+      capability: Capability,
+      available: z.boolean(),
+      credits: z.number().int().nonnegative(),
+      /** Present when `available` is false. Says why, in the same vocabulary as a section. */
+      reason: Reason.optional(),
+      cached: z.boolean(),
+    }),
+  ),
+  disclaimer: z.string(),
+});
+export type CapabilitiesResponse = z.infer<typeof CapabilitiesResponse>;
+
+export const BalanceResponse = z.object({
+  schema_version: z.string(),
+  tenant_id: z.string(),
+  credits_remaining: z.number().int(),
+  recent: z.array(
+    z.object({
+      delta: z.number().int(),
+      reason: z.string(),
+      check_id: z.string().nullable(),
+      balance_after: z.number().int(),
+      created_at: z.string().datetime(),
+    }),
+  ),
+});
+export type BalanceResponse = z.infer<typeof BalanceResponse>;
+
+export const WebhookRegistration = z.object({
+  url: z.string().url(),
+  events: z.array(z.enum(['check.completed'])).default(['check.completed']),
+});
+export type WebhookRegistration = z.infer<typeof WebhookRegistration>;
+
+export const WebhookRegistered = z.object({
+  id: z.string(),
+  url: z.string(),
+  events: z.array(z.string()),
+  /** Shown once. Sign-verify your side with HMAC-SHA256 over the raw body. */
+  secret: z.string(),
+});
+export type WebhookRegistered = z.infer<typeof WebhookRegistered>;
+
 export const ErrorResponse = z.object({
   error: z.object({
     code: z.string(),

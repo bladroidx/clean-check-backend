@@ -10,6 +10,20 @@ docs {
   - no response ever contains the full 15-digit IMEI
   - every section carries `coverage`, `checked_at` and its evidence
   - `/readyz` never depends on a provider
+  - a well-formed, authorised request returns 200 even when every section is `unavailable`
+  - there is no top-level `clean` boolean, ever
+  - nothing is charged for a section we could not answer
+  - a retried `POST /v1/checks` returns the first response and does not charge twice
+
+  ## Folders
+
+  **Free tier** and **Meta** need nothing but `npm run dev`.
+
+  **Paid** and **Account** need a server started with `DATABASE_URL`, plus an `apiKey` set in the
+  Local environment (it is declared as a secret var, so it is never written to the file). They
+  still pass with no provider credentials configured: the paid sections come back
+  `unavailable(provider_not_configured)` at zero cost, and every contract assertion holds. That is
+  the point — the contract does not depend on a supplier being up.
 
   Test IMEIs live in the **Local** environment as variables, so no request file contains a
   15-digit number. That is deliberate: `apps/api/test/sentinel.test.ts` greps the whole repo for

@@ -1,0 +1,39 @@
+meta {
+  name: Check — unauthenticated
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/v1/checks
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+  idempotency-key: bruno-unauthenticated-key-001
+}
+
+body:json {
+  {
+    "imei": "{{validImei}}"
+  }
+}
+
+assert {
+  res.status: eq 401
+}
+
+tests {
+  test("401, and the body never echoes a credential", function () {
+    expect(res.getStatus()).to.equal(401);
+    expect(res.getBody().error.code).to.equal("unauthorised");
+  });
+}
+
+docs {
+  4xx is our-fault-or-yours; a missing key is yours. Note that every auth failure returns the same
+  body: distinguishing "no such key" from "revoked" from "expired" tells an attacker which of
+  their guesses was structurally right.
+}

@@ -1,0 +1,35 @@
+meta {
+  name: Balance and ledger
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/v1/balance
+  body: none
+  auth: none
+}
+
+headers {
+  authorization: Bearer {{apiKey}}
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("the ledger explains every charge in the billing vocabulary", function () {
+    for (const entry of res.getBody().recent) {
+      expect(entry).to.have.property("delta");
+      expect(entry).to.have.property("reason");
+      expect(entry).to.have.property("balance_after");
+    }
+  });
+}
+
+docs {
+  Prepaid credits only work as a chargeback defence if the customer can see exactly what they were
+  charged for. `reason` is the same vocabulary the billing code uses — `not_charged_our_lexicon_gap`
+  says, in the customer's own statement, that we did not bill them for our bug.
+}

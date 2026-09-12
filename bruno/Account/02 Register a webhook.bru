@@ -1,0 +1,45 @@
+meta {
+  name: Register a webhook
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/v1/webhooks
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+  authorization: Bearer {{apiKey}}
+}
+
+body:json {
+  {
+    "url": "https://hooks.example.com/imei-check",
+    "events": ["check.completed"]
+  }
+}
+
+assert {
+  res.status: eq 201
+}
+
+tests {
+  test("returns a signing secret exactly once", function () {
+    expect(res.getBody().secret).to.be.a("string");
+  });
+}
+
+docs {
+  Standard (non-express) supplier services answer in hours, so a check can complete long after the
+  HTTP response. Register a webhook or poll `GET /v1/checks/:id`.
+
+  We sign each delivery with HMAC-SHA256 over `<timestamp>.<body>`, sent as
+  `x-imei-check-signature`. Verify it: the timestamp is inside the signed material so a captured
+  delivery cannot be replayed against you forever.
+
+  An `http://` URL or a private address is refused — reports carry device identifiers, and we are
+  not going to be someone's SSRF proxy.
+}

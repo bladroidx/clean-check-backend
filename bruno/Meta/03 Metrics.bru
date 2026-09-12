@@ -1,0 +1,35 @@
+meta {
+  name: Metrics
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/metrics
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("carries the two signals that predict this service's failures", function () {
+    const body = res.getBody();
+    // Format drift: a supplier rewording "Clean" makes every affected section go amber.
+    expect(body).to.include("imei_lexicon_miss_total");
+    // Money we spent and did not charge for. Invisible in revenue; where a margin dies quietly.
+    expect(body).to.include("imei_absorbed_cost_usd_total");
+  });
+
+  test("no metric label carries an IMEI", function () {
+    expect(res.getBody()).to.not.match(/\b\d{15}\b/);
+  });
+}
+
+docs {
+  Prometheus exposition. Label cardinality is a correctness question here, not a cost one: a label
+  carrying an IMEI, a check id or a tenant-supplied string would either leak or explode the series
+  count.
+}

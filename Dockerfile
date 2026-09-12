@@ -2,10 +2,15 @@
 # reaches end-of-life before this service will.
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+# Manifests first, so `npm ci` is cached until a dependency actually changes. Every workspace has
+# to be listed: npm resolves the whole graph at install time and a missing one fails the install.
 COPY package.json package-lock.json tsconfig.base.json tsconfig.json ./
 COPY packages/contract/package.json packages/contract/
 COPY packages/identity/package.json packages/identity/
+COPY packages/providers/package.json packages/providers/
+COPY packages/core/package.json packages/core/
 COPY apps/api/package.json apps/api/
+COPY apps/worker/package.json apps/worker/
 RUN npm ci
 COPY . .
 RUN npm run build && npm prune --omit=dev

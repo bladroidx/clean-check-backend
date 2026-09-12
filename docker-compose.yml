@@ -31,14 +31,29 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
-    environment:
+    environment: &app_env
       NODE_ENV: development
-      PORT: '3000'
       LOG_LEVEL: info
       # Development value only. Production reads this from the platform secret store.
       SERVER_PEPPER: dev-pepper-not-for-production-0123456789
       DATABASE_URL: postgres://imei:imei@postgres:5432/imei_check?sslmode=disable
+      # Where an async supplier POSTs its answer back to. Inside compose that is the api service.
+      PUBLIC_BASE_URL: http://api:3000
     ports: ['3000:3000']
+
+  # A separate process, not a thread in the API.
+  #
+  # A poll storm or a slow webhook receiver must not consume the connection pool that paid checks
+  # need; the two have very different latency requirements and should fail independently. Every
+  # job claims its rows with FOR UPDATE SKIP LOCKED, so scaling this to N replicas is safe and is
+  # the intended way to scale it.
+  worker:
+    build: .
+    command: ['node', 'apps/worker/dist/main.js']
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    environment: *app_env
 
 volumes:
   pgdata:

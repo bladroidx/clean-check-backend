@@ -14,9 +14,25 @@
     "@fastify/swagger-ui": "^6.1.1",
     "@imei-check/contract": "*",
     "@imei-check/identity": "*",
+    "@imei-check/providers": "*",
     "fastify": "^5.2.0",
+    "fastify-plugin": "5.0.1",
     "fastify-type-provider-zod": "^4.0.2",
+    "pg": "8.13.1",
     "pino": "^9.5.0",
-    "zod": "^3.24.1"
+    "prom-client": "15.1.3",
+    "undici": "^7.29.1",
+    "zod": "^3.24.1",
+    "@imei-check/core": "*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
   }
 }

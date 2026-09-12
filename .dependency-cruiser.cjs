@@ -42,6 +42,23 @@ module.exports = {
       to: { path: '^(fs|node:fs|http|node:http|pg|dotenv)$', dependencyTypes: ['core', 'npm'] },
     },
     {
+      name: 'apps-do-not-depend-on-apps',
+      severity: 'error',
+      comment:
+        'apps/ are independent compositions. The worker reaching into the api would couple two ' +
+        'processes with different failure modes and make the api unshippable without the worker; ' +
+        'shared domain code belongs in packages/core.',
+      from: { path: '^apps/([^/]+)/' },
+      to: { path: '^apps/', pathNot: '^apps/$1/' },
+    },
+    {
+      name: 'core-is-below-apps',
+      severity: 'error',
+      comment: 'packages/core holds the domain; it must never reach back up into a composition.',
+      from: { path: '^packages/core/src' },
+      to: { path: '^apps/' },
+    },
+    {
       name: 'no-orphans',
       severity: 'warn',
       from: { orphan: true, pathNot: ['\\.d\\.ts$', 'emit-schema', '(^|/)index\\.ts$'] },

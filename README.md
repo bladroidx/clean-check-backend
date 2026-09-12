@@ -30,9 +30,10 @@ Concretely, three things no competitor ships:
 
 ```bash
 npm ci
-npm test                                             # 104 tests
+npm test                                             # 349 tests
 npm run build
 
+# Free tier only: no database, no suppliers, costs nothing to run.
 SERVER_PEPPER="$(head -c 48 /dev/urandom | base64)" npm run dev
 ```
 
@@ -46,37 +47,61 @@ curl -s -X POST localhost:3000/v1/imei/validate \
 
 Interactive docs at `/docs`, generated OpenAPI at `/openapi.json`.
 
-Or the whole stack: `docker compose up --build` (Postgres + migrations + API).
+For the paid path, add a database — the paid routes appear only when `DATABASE_URL` is set:
 
-## Status — M0 complete
+```bash
+docker compose up --build              # Postgres + migrations + API + worker
+```
+
+## Status
 
 | | |
 |---|---|
 | ✅ **M0 walking skeleton** | Free tier, contract, identity, schema, Docker, migrations. **Costs nothing to run.** |
-| ⬜ M1 | API keys, credits, one DHRU provider, `blacklist.gsma`, field cache |
-| ⬜ M2 | Second provider, failover, circuit breaker, async orders + webhooks |
-| ⬜ M3 | `lock.carrier` / `lock.activation` / Apple GSX; wire up the Android app |
+| ✅ **M1** | API keys, credits ledger, field cache, charge matrix, DHRU legacy provider |
+| ✅ **M2** | Second provider, failover, circuit breaker, async orders, inbound + outbound webhooks |
+| ✅ **M3** | `lock.carrier` · `lock.activation` · `lock.mdm` · `warranty.*` · `network.sold_by` |
 | ⬜ M4 | Apply for GSMA Device Check direct, behind the same `Provider` interface |
 
-Shipping today, all free and offline:
+**Free and offline** — no key, no database, no supplier:
 
 - `POST /v1/imei/validate` — parse, Luhn, mask, TAC identity
 - `GET /v1/tac/:tac` — one TAC (deliberately no bulk endpoint; see ADR-0005)
 - `GET /v1/attributions`, `/healthz`, `/readyz`, `/openapi.json`, `/docs`
+
+**Paid** — bearer API key, prepaid credits, `DATABASE_URL` required:
+
+- `POST /v1/checks` — the full report. Mandatory `Idempotency-Key`.
+- `GET /v1/checks/:id` — fetch a check, including sections answered asynchronously since
+- `POST /v1/capabilities` — what is checkable for a device and what it costs, before committing
+- `GET /v1/balance` — credits and the ledger that explains them
+- `POST /v1/webhooks` — register an endpoint for asynchronously completed checks
+- `GET /metrics` — Prometheus
+
+Supplier credentials are optional even on the paid path. With none configured, paid sections come
+back `unavailable(provider_not_configured)` at zero cost and every contract guarantee still holds.
 
 ## Layout
 
 ```
 packages/contract    zod → types → OpenAPI, plus the seven envelope invariants. Zero deps but zod.
 packages/identity    Imei parse/Luhn/mask/hash + the TAC directory. Pure: no I/O, no clock, no env.
+packages/providers   Provider interface, DHRU legacy + REST transports, the normalisation lexicon,
+                     the service catalogue, circuit breaker and the router that must not fail over
+                     after a definite answer.
+packages/core        The domain: repositories (Postgres and in-memory), the field cache and its
+                     TTL table, the charge matrix, metrics, and assemble.ts — the ONE place a
+                     provider outcome becomes a public SectionResult.
 apps/api             Fastify. Composition only.
+apps/worker          Poll async orders, deliver webhooks, reconcile the ledger, ingest TACs.
 db/migrations        Plain SQL, dbmate, applied as a separate init step — never on app boot.
 docs/adr             Why things are the way they are.
 testdata             Golden IMEI vectors, shared with check-this-phone.
 ```
 
-Direction is `contract ← identity ← apps`, and nothing depends on `apps/`. Enforced by
-`npm run boundaries` — the analogue of the Android app's Konsist `ModuleBoundaryTest`.
+Direction is `contract ← identity ← providers ← core ← apps`, and **nothing depends on `apps/`** —
+including the other app. Enforced by `npm run boundaries`, the analogue of the Android app's
+Konsist `ModuleBoundaryTest`.
 
 ## The rules that matter
 
@@ -140,11 +165,13 @@ device`.
 
 ### What's in it
 
-| Folder | Requests |
-|---|---|
-| **Health** | `healthz`, `readyz` |
-| **Free tier** | validate a known device · an unknown TAC · a checksum failure · dual-SIM clipboard text · wrong length · TAC lookup · TAC not found |
-| **Meta** | attributions, OpenAPI document |
+| Folder | Requests | Needs |
+|---|---|---|
+| **Health** | `healthz`, `readyz` | nothing |
+| **Free tier** | validate a known device · an unknown TAC · a checksum failure · dual-SIM clipboard text · wrong length · TAC lookup · TAC not found | nothing |
+| **Meta** | attributions, OpenAPI document, metrics | nothing |
+| **Paid** | full report · idempotent retry · capabilities preview · unauthenticated | `DATABASE_URL` + `apiKey` |
+| **Account** | balance and ledger · register a webhook | `DATABASE_URL` + `apiKey` |
 
 Every request carries assertions, so the collection doubles as an executable check of the rules
 this service must never break — an unknown TAC is `inconclusive` and never `pass`; no response
@@ -171,7 +198,8 @@ Assertions 26/26
   on. That is deliberate: `apps/api/test/sentinel.test.ts` sweeps the whole repo for 15-digit
   numbers, and that one file is allowlisted with its contents pinned.
 - All the numbers are synthetic — Luhn-valid, allocated to no real handset.
-- Nothing here needs an API key yet. The free tier takes none, and paid capabilities land in M1.
+- **Health**, **Free tier** and **Meta** need no key. **Paid** and **Account** need `apiKey` set in
+  the Local environment — it is declared as a secret var, so Bruno never writes it to the file.
 - Prefer curl or an OpenAPI-aware client? `/openapi.json` serves the generated document and
   `/docs` serves a browsable UI.
 
@@ -187,4 +215,16 @@ npm run schema:diff      # classify the delta as additive or breaking
 ```
 
 `SERVER_PEPPER` must be at least 32 bytes or the process refuses to boot, and says why. The IMEI
-space is ~10^14 and enumerable in seconds, so a short pepper pseudonymises nothing.
+space is ~10^14 and enumerable in seconds, so a short pepper pseudonymises nothing. The same floor
+applies to a tenant's own salt, checked when the tenant is created rather than on their first paid
+check — a weakly-salted tenant is not a latent 500, it is a broken privacy claim.
+
+### Two hashes, and they are not interchangeable
+
+| | Construction | Purpose |
+|---|---|---|
+| Internal | `HMAC-SHA256(SERVER_PEPPER, digits)` | Cache key, dedupe, abuse accounting. **Never returned.** |
+| Returned | `HMAC-SHA256(tenant_salt, digits)` | `subject.imei_hash`, so a tenant correlates their own records and nobody else's. |
+
+`Imei.saltedHash` is a verbatim port of the Kotlin for golden-vector parity. **Compat only** — it
+is not a server key.

@@ -9,7 +9,7 @@ import {
   pass,
 } from '@imei-check/contract';
 import { Imei } from '@imei-check/identity';
-import { identityCoverage } from '../lib/coverage.js';
+import { identityCoverage } from '@imei-check/core';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 
 /**

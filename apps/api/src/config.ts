@@ -25,6 +25,11 @@ const DEFAULT_TAC_SOURCE_FILE = fileURLToPath(
   new URL('../../../testdata/tac-seed.json', import.meta.url),
 );
 
+/** Same reasoning as the TAC seed path: identical from `apps/api/src` and `apps/api/dist`. */
+const DEFAULT_CATALOGUE_DIR = fileURLToPath(
+  new URL('../../../packages/providers/catalogue', import.meta.url),
+);
+
 const pepper = z
   .string()
   .refine((s) => Buffer.byteLength(s, 'utf8') >= MIN_PEPPER_BYTES, {
@@ -46,6 +51,27 @@ export const ConfigSchema = z.object({
 
   /** Where the TAC directory is loaded from at boot. Relative paths resolve against the cwd. */
   TAC_SOURCE_FILE: z.string().default(DEFAULT_TAC_SOURCE_FILE),
+
+  /** Directory of provider catalogue YAML. Absent means the free tier only, which is a valid mode. */
+  PROVIDER_CATALOGUE_DIR: z.string().default(DEFAULT_CATALOGUE_DIR),
+
+  /**
+   * Public base URL, used to build the `feedback_url` an async supplier POSTs back to.
+   * Wrong here means standard orders are placed and their answers land nowhere.
+   */
+  PUBLIC_BASE_URL: z.string().url().optional(),
+
+  ALPHA_BASE_URL: z.string().url().optional(),
+  ALPHA_USERNAME: z.string().optional(),
+  ALPHA_API_KEY: z.string().optional(),
+
+  BETA_BASE_URL: z.string().url().optional(),
+  BETA_TOKEN: z.string().optional(),
+  /** Without this, inbound feedback webhooks are REFUSED rather than trusted. */
+  BETA_WEBHOOK_SECRET: z.string().optional(),
+
+  /** Free tier limits are licensing controls as much as abuse controls (ADR-0005). */
+  RATE_LIMIT_ENABLED: z.coerce.boolean().default(true),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

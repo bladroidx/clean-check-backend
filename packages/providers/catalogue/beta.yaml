@@ -1,0 +1,56 @@
+# Supplier B — modern DHRU reseller REST.
+#
+# Exists so that no paid capability is single-sourced. A single-sourced capability is a business
+# risk, not a technical one: when supplier A's own upstream access is revoked on a Friday, the
+# product either has a second leg or it stops answering (ADR-0002).
+#
+# Beta is dearer than alpha on blacklist, so the router tries alpha first — candidates are ordered
+# by cost. Beta is reached on transport failure or an open circuit, never because alpha said
+# something we did not like.
+provider_id: beta
+services:
+  - service_id: blacklist-global
+    display_name: "Global Blocklist (GSMA + national CEIR)"
+    capabilities: [blacklist.gsma]
+    fields:
+      - blacklist.status
+      - blacklist.reported_by
+    lexicon: blacklist
+    cost_usd: 0.19
+    credits: 3
+    async: false
+    timeout_ms: 20000
+    applies_to_tac_prefixes: ["*"]
+    enabled: true
+
+  # Covers the same capability set as alpha's service 30, so that no paid capability is
+  # single-sourced. `catalogue.test.ts` fails the build if any capability drops to one supplier:
+  # when a reseller's own upstream access is revoked on a Friday, a single-sourced capability
+  # simply stops answering.
+  - service_id: apple-gsx
+    display_name: "Apple GSX Full"
+    capabilities:
+      - lock.activation
+      - lock.carrier
+      - lock.mdm
+      - warranty.purchase_date
+      - network.sold_by
+      - identity.model
+    fields:
+      - lock.activation.status
+      - lock.carrier.status
+      - lock.carrier.network
+      - lock.mdm.status
+      - warranty.purchase_date
+      - network.sold_by
+      - identity.manufacturer
+      - identity.model
+    lexicon: apple-basic
+    cost_usd: 0.60
+    credits: 8
+    # Standard (non-express) service: the answer arrives by webhook in hours, which is why the
+    # async order lifecycle is required rather than optional.
+    async: true
+    timeout_ms: 30000
+    applies_to_tac_prefixes: ["35310411", "35847191", "01332300", "35326907"]
+    enabled: true

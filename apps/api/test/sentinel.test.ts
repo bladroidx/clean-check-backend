@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { App } from '../src/app.js';
 import { SENTINEL, UNKNOWN_TAC_IMEI, makeApp } from './helpers.js';
+import { BLOCKED, CLEAN, FakeProvider, REWORDED, TIMEOUT, idempotencyKey, makePaidApp } from './paid-helpers.js';
 
 /**
  * The sentinel test.
@@ -25,7 +26,10 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.claude'
 const ALLOWED = [
   /testdata\/imei-vectors\.json$/,
   /apps\/api\/test\//,
+  /apps\/worker\/test\//,
   /packages\/identity\/test\//,
+  /packages\/core\/test\//,
+  /packages\/providers\/test\//,
   /(^|\/)README\.md$/,
   // The Bruno collection keeps its test numbers in one environment file so no request contains
   // one. Pinned below, exactly as README.md is.
@@ -89,6 +93,89 @@ describe('sentinel IMEI', () => {
       if (/\b\d{15}\b/.test(text)) offenders.push(file.replace(`${REPO}/`, ''));
     }
     expect(offenders, `15-digit numbers found in: ${offenders.join(', ')}`).toEqual([]);
+  });
+
+  /**
+   * The paid path, which is where the sentinel is most at risk.
+   *
+   * The free tier never sends the number anywhere. The paid path hands the raw digits to a
+   * supplier, receives free text back, writes a cache row, a ledger row, a provider_calls row and
+   * a check record, and serialises a report -- every one of which is a place the digits could
+   * land. Running the sentinel through all four arms and then grepping everything the process
+   * produced is the only way that stays true past month three.
+   */
+  it('survives the whole PAID path: no response, log, cache row or stored section holds it', async () => {
+    for (const outcome of [CLEAN, BLOCKED, REWORDED, TIMEOUT]) {
+      const harness = await makePaidApp({ providers: [new FakeProvider('fake', outcome)], credits: 500 });
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/v1/checks',
+        headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
+        payload: { imei: SENTINEL, capabilities: ['blacklist.gsma', 'identity.model'] },
+      });
+
+      expect(response.body).not.toContain(SENTINEL);
+      expect(harness.logs.raw()).not.toContain(SENTINEL);
+
+      const checkId = response.json().check_id as string;
+      const stored = await harness.repos.checks.sections(checkId);
+      expect(JSON.stringify(stored)).not.toContain(SENTINEL);
+
+      const record = await harness.repos.checks.byId('ten_test', checkId);
+      expect(JSON.stringify(record)).not.toContain(SENTINEL);
+
+      const ledger = await harness.repos.credits.ledger('ten_test', 100);
+      expect(JSON.stringify(ledger)).not.toContain(SENTINEL);
+
+      // The cache is keyed on the INTERNAL hash, never the digits.
+      const cached = await harness.repos.cache.get(`${SENTINEL}:blacklist.status`);
+      expect(cached).toBeUndefined();
+
+      // And the balance query path, and the capabilities preview.
+      const capabilities = await harness.app.inject({
+        method: 'POST',
+        url: '/v1/capabilities',
+        headers: harness.auth(),
+        payload: { imei: SENTINEL },
+      });
+      expect(capabilities.body).not.toContain(SENTINEL);
+
+      const fetched = await harness.app.inject({
+        method: 'GET',
+        url: `/v1/checks/${checkId}`,
+        headers: harness.auth(),
+      });
+      expect(fetched.body).not.toContain(SENTINEL);
+
+      await harness.app.close();
+    }
+  });
+
+  it('does not leak the sentinel through a supplier error message', async () => {
+    // The realistic leak: a supplier echoes the IMEI inside free text and we hand that straight
+    // to the logger or to the caller.
+    const harness = await makePaidApp({
+      providers: [
+        new FakeProvider('fake', {
+          kind: 'failed',
+          reason: 'http_error',
+          detail: `provider said: no record for ${SENTINEL}`,
+        }),
+      ],
+    });
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/v1/checks',
+      headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
+      payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain(SENTINEL);
+    expect(harness.logs.raw()).not.toContain(SENTINEL);
+    await harness.app.close();
   });
 
   it('the README carries only the one documented synthetic example', () => {

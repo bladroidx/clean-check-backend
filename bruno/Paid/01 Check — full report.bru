@@ -1,0 +1,98 @@
+meta {
+  name: Check — full report
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/v1/checks
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+  authorization: Bearer {{apiKey}}
+  idempotency-key: {{$guid}}
+}
+
+body:json {
+  {
+    "imei": "{{validImei}}",
+    "capabilities": ["identity.model", "blacklist.gsma"]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("200 even when a section could not be answered", function () {
+    // A 502 is indistinguishable to a naive client from "nothing wrong found". Invariant 7.
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("never returns the full IMEI", function () {
+    expect(JSON.stringify(res.getBody())).to.not.include(bru.getEnvVar("validImei"));
+    expect(res.getBody().subject.imei_masked).to.match(/^\d{2}•{11}\d{2}$/);
+  });
+
+  test("there is no top-level clean boolean", function () {
+    // A wrong boolean either facilitates the sale of stolen goods or defames a seller.
+    expect(res.getBody()).to.not.have.property("clean");
+    expect(["green", "amber", "red", "undetermined"]).to.include(res.getBody().summary.verdict);
+  });
+
+  test("every section carries coverage and checked_at, on all four arms", function () {
+    for (const [name, section] of Object.entries(res.getBody().sections)) {
+      expect(section.coverage, name).to.be.an("object");
+      expect(section.coverage.caveats.length, name).to.be.above(0);
+      expect(Date.parse(section.checked_at), name).to.not.be.NaN;
+    }
+  });
+
+  test("a pass never appears without evidence", function () {
+    for (const [name, section] of Object.entries(res.getBody().sections)) {
+      if (section.outcome === "pass" || section.outcome === "fail") {
+        expect(section.evidence.length, name).to.be.above(0);
+      }
+    }
+  });
+
+  test("an inconclusive always says what to do about it", function () {
+    for (const [name, section] of Object.entries(res.getBody().sections)) {
+      if (section.outcome === "inconclusive") {
+        expect(section.remedy, name).to.be.a("string");
+      }
+    }
+  });
+
+  test("an unavailable section is stated in the summary, never dropped", function () {
+    const unavailable = Object.values(res.getBody().sections)
+      .filter((s) => s.outcome === "unavailable")
+      .map((s) => s.capability);
+    for (const capability of unavailable) {
+      expect(res.getBody().summary.sections_unavailable).to.include(capability);
+    }
+  });
+
+  test("nothing is charged for a section we could not answer", function () {
+    const body = res.getBody();
+    for (const line of body.billing.breakdown) {
+      const section = body.sections[line.capability];
+      if (section && section.outcome === "unavailable") {
+        expect(line.credits, line.capability).to.equal(0);
+      }
+    }
+  });
+}
+
+docs {
+  The paid path. Requires `apiKey` in the environment and a server started with `DATABASE_URL`.
+
+  With no provider credentials configured, `blacklist.gsma` comes back
+  `unavailable(provider_not_configured)` and costs nothing — which is the honest answer, and the
+  assertions above still all hold. That is the point: the contract does not depend on a supplier
+  being up.
+}

@@ -12,6 +12,12 @@ import type { InMemoryTacDirectory } from '@imei-check/identity';
 import { healthRoutes } from './routes/health.js';
 import { imeiRoutes } from './routes/imei.js';
 import { tacRoutes } from './routes/tac.js';
+import { checkRoutes } from './routes/checks.js';
+import { accountRoutes } from './routes/account.js';
+import { providerFeedbackRoutes } from './routes/provider-feedback.js';
+import { authPlugin } from './auth/plugin.js';
+import { registerRawBody } from './lib/raw-body.js';
+import type { AppServices } from './services.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -22,6 +28,11 @@ declare module 'fastify' {
 export interface AppDeps {
   logger: Logger;
   tacDirectory: InMemoryTacDirectory;
+  /**
+   * The paid path. Absent means the free offline tier only -- which is a supported mode, not a
+   * degraded one: it costs nothing to run and is genuinely useful (milestone M0).
+   */
+  services?: AppServices;
 }
 
 export type App = Awaited<ReturnType<typeof buildApp>>;
@@ -49,6 +60,8 @@ export async function buildApp(deps: AppDeps) {
       },
       tags: [
         { name: 'free', description: 'No credits, no upstream providers.' },
+        { name: 'paid', description: 'Costs credits. Requires an API key.' },
+        { name: 'account', description: 'Balance, ledger and webhooks.' },
         { name: 'meta', description: 'Health, schema and attributions.' },
       ],
     },
@@ -75,6 +88,28 @@ export async function buildApp(deps: AppDeps) {
   await app.register(healthRoutes);
   await app.register(imeiRoutes);
   await app.register(tacRoutes);
+
+  if (deps.services !== undefined) {
+    const services = deps.services;
+    registerRawBody(app);
+    await app.register(authPlugin, {
+      async lookup(sha256) {
+        const key = await services.repos.apiKeys.byHash(sha256);
+        if (key === undefined) return undefined;
+        const now = new Date();
+        // Revoked and expired are checked HERE rather than in the query, so that the reason a key
+        // fails is never encoded in a difference the caller can observe.
+        if (key.revokedAt !== undefined && key.revokedAt <= now) return undefined;
+        if (key.expiresAt !== undefined && key.expiresAt <= now) return undefined;
+        const tenant = await services.repos.tenants.byId(key.tenantId);
+        return tenant === undefined ? undefined : { tenant, apiKeyId: key.id };
+      },
+      onUsed: (id, at) => services.repos.apiKeys.touch(id, at),
+    });
+    await app.register(checkRoutes(services));
+    await app.register(accountRoutes(services));
+    await app.register(providerFeedbackRoutes(services));
+  }
 
   return app;
 }

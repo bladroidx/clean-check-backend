@@ -69,10 +69,21 @@ open circuit only. If provider A says "blacklisted", do not shop for one who say
 ## Layout
 
 `packages/contract` (zod → types → OpenAPI, zero deps) ← `packages/identity` (pure, no I/O) ←
-`packages/providers` ← `apps/api`, `apps/worker`. **Nothing depends on `apps/`.** Enforced by
-dependency-cruiser in CI — the analogue of the app's `ModuleBoundaryTest`.
+`packages/providers` (suppliers, lexicon, router) ← `packages/core` (repositories, cache, charge
+matrix, `assemble.ts`) ← `apps/api`, `apps/worker`.
+
+**Nothing depends on `apps/` — including the other app.** Shared domain code goes in
+`packages/core`; see ADR-0006. Enforced by dependency-cruiser in CI — the analogue of the app's
+`ModuleBoundaryTest`.
+
+`assemble.ts` in `packages/core` is the ONE place a `ProviderOutcome` becomes a `SectionResult`.
+It is also the last place caller-facing text is scrubbed of IMEI digits, because an adapter can
+construct a `detail` that never passed through the transport's scrubber.
 
 ## Commands
 
-`npm test` · `npm run typecheck` · `/quality` for the full gate · `/leaks` before any merge that
-touches logging, persistence or a provider.
+`npm test` · `npm run typecheck` · `npm run boundaries` · `/quality` for the full gate · `/leaks`
+before any merge that touches logging, persistence or a provider.
+
+The paid routes exist only when `DATABASE_URL` is set. Without it the service runs the free
+offline tier — a supported mode, not a degraded one.

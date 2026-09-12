@@ -1,0 +1,53 @@
+meta {
+  name: Capabilities — price before spending
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/v1/capabilities
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+  authorization: Bearer {{apiKey}}
+}
+
+body:json {
+  {
+    "imei": "{{validImei}}"
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("prices every capability without spending anything", function () {
+    for (const entry of res.getBody().capabilities) {
+      expect(entry).to.have.property("credits");
+      expect(entry).to.have.property("available");
+    }
+  });
+
+  test("the offline and derived capabilities are free", function () {
+    const byName = Object.fromEntries(res.getBody().capabilities.map((c) => [c.capability, c]));
+    expect(byName["identity.model"].credits).to.equal(0);
+    expect(byName["warranty.status"].credits).to.equal(0);
+  });
+
+  test("never returns the full IMEI", function () {
+    expect(JSON.stringify(res.getBody())).to.not.include(bru.getEnvVar("validImei"));
+  });
+}
+
+docs {
+  A POST, not a GET, despite being a read.
+
+  An IMEI in a query string is an IMEI in every access log, reverse proxy, browser history and
+  `Referer` header between the caller and us. REST purity is not worth leaking the one identifier
+  this service exists to protect.
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@imei-check/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@imei-check/contract": "*",
+    "@imei-check/identity": "*",
+    "@imei-check/providers": "*",
+    "pino": "^9.5.0",
+    "@imei-check/core": "*"
+  }
+}
