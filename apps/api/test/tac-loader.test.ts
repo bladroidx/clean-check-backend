@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadTacDirectory } from '../src/lib/tac.js';
+import { TacDirectoryUnreadable, loadTacDirectory } from '../src/lib/tac.js';
 
 const write = (content: unknown): string => {
   const dir = mkdtempSync(join(tmpdir(), 'imei-tac-'));
@@ -52,6 +52,50 @@ describe('loadTacDirectory', () => {
   it('throws on a missing file rather than starting with an empty directory', () => {
     // Booting with a silently empty directory would turn every identity answer into
     // "TAC not found" -- honest, but a total capability loss nobody would notice.
-    expect(() => loadTacDirectory('/nonexistent/tac.json')).toThrow();
+    expect(() => loadTacDirectory('/nonexistent/tac.json')).toThrow(TacDirectoryUnreadable);
+  });
+
+  /**
+   * The message is the feature here.
+   *
+   * A bare ENOENT naming only the file sent a developer round the houses twice: the realistic
+   * cause is a RELATIVE `TAC_SOURCE_FILE` in a `.env`, resolved against a cwd the author did not
+   * have in mind (`npm run dev` starts in apps/api; Docker starts in the repo root). The error has
+   * to name the variable, show what it resolved to and from where, and say what to do.
+   */
+  it('explains a relative path failure well enough to fix it without reading the source', () => {
+    let message = '';
+    try {
+      loadTacDirectory('testdata/definitely-not-here.json');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('TAC_SOURCE_FILE');
+    expect(message).toContain('RELATIVE');
+    expect(message).toContain('cwd');
+    expect(message).toContain(process.cwd());
+    // The actionable instruction, not just the diagnosis.
+    expect(message).toMatch(/comment it out|Unset/);
+  });
+
+  it('does not blame relative resolution when the path was absolute', () => {
+    let message = '';
+    try {
+      loadTacDirectory('/nonexistent/tac.json');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('absolute');
+    expect(message).not.toContain('RELATIVE');
+  });
+
+  it('keeps the original error as `cause`, so the real errno is not lost', () => {
+    try {
+      loadTacDirectory('/nonexistent/tac.json');
+      expect.unreachable('should have thrown');
+    } catch (error) {
+      expect((error as Error).cause).toMatchObject({ code: 'ENOENT' });
+    }
   });
 });
