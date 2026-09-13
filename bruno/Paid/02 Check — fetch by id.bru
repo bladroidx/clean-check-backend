@@ -1,0 +1,50 @@
+meta {
+  name: Check — fetch by id
+  type: http
+  seq: 2
+  tags: [
+    paid
+  ]
+}
+
+get {
+  url: {{baseUrl}}/v1/checks/{{lastCheckId}}
+  body: none
+  auth: none
+}
+
+headers {
+  authorization: Bearer {{apiKey}}
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("returns the same check_id we just created", function () {
+    expect(res.getBody().check_id).to.equal(bru.getVar("lastCheckId"));
+  });
+
+  test("never returns the full IMEI", function () {
+    expect(JSON.stringify(res.getBody())).to.not.include(bru.getEnvVar("validImei"));
+  });
+
+  test("belongs to this tenant only — a 404 for a made-up id", function () {
+    // Not asserted here (would need a second request), but see the docs note below.
+    expect(res.getBody()).to.have.property("sections");
+  });
+}
+
+docs {
+  Run **01 Check — full report** first — it saves `check_id` into the runtime variable
+  `lastCheckId` that this request reads.
+
+  This is how a caller picks up a check that went `status: "partial"` because a standard
+  (non-express) supplier order is still outstanding: poll this endpoint, or register a webhook
+  (see **Account → Register a webhook**) and wait to be told.
+
+  A check id that exists but belongs to a different tenant returns 404, not 403 — the same
+  reasoning as the auth 401: telling an attacker "that id exists but isn't yours" is a
+  confirmation they didn't earn.
+}

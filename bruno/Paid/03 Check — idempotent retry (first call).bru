@@ -1,0 +1,58 @@
+meta {
+  name: Check — idempotent retry (first call)
+  type: http
+  seq: 3
+  tags: [
+    paid
+  ]
+}
+
+post {
+  url: {{baseUrl}}/v1/checks
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+  authorization: Bearer {{apiKey}}
+  idempotency-key: {{retryIdempotencyKey}}
+}
+
+body:json {
+  {
+    "imei": "{{validImei}}",
+    "capabilities": ["identity.model"]
+  }
+}
+
+script:pre-request {
+  // Generated fresh per collection RUN (not per request) so re-running the whole suite never
+  // collides with a leftover row from a previous run -- a fixed literal key here would mean a
+  // crash mid-test permanently 409s every future run against the same key.
+  if (!bru.getVar("retryIdempotencyKey")) {
+    const key = "bruno-retry-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+    bru.setVar("retryIdempotencyKey", key);
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("records what the first call actually charged", function () {
+    bru.setVar("firstCheckId", res.getBody().check_id);
+    bru.setVar("balanceAfterFirstCall", res.getBody().billing.credits_remaining);
+  });
+}
+
+docs {
+  Half of the idempotency test — see **04 Check — idempotent retry (replay)**, which sends the
+  exact same `Idempotency-Key` and asserts the check id and the charged balance are unchanged.
+
+  Split into two requests (rather than "send this one twice by hand") so `bru run` actually
+  exercises the retry path in one pass: a single request whose test script only checks a saved
+  variable takes the `else` branch and asserts nothing the first time a collection runs headlessly
+  — which is a test that always passes without ever having tested anything.
+}

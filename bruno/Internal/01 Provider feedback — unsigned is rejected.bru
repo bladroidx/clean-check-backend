@@ -1,0 +1,57 @@
+meta {
+  name: Provider feedback — unsigned is rejected
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/internal/providers/beta/feedback
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "reference_id": "does-not-exist",
+    "status": "success",
+    "replay": "QmxhY2tsaXN0IFN0YXR1czogQ2xlYW4="
+  }
+}
+
+tests {
+  test("refuses an unsigned payload; never trusts an inbound webhook by default", function () {
+    // No provider is configured with a webhook secret in a bare dev environment, so this route
+    // returns 404 (unknown provider) rather than 200 -- either way it must never be 200 with the
+    // payload accepted, which is the one outcome that would let a forged "Clean" through.
+    expect(res.getStatus()).to.not.equal(200);
+  });
+
+  test("gives no detail about why it was rejected", function () {
+    // Telling a forger which half of the verification failed is free reconnaissance.
+    const body = JSON.stringify(res.getBody());
+    expect(body).to.not.match(/signature|hmac|secret/i);
+  });
+}
+
+docs {
+  This is NOT a route a legitimate client ever calls — it is the inbound webhook a supplier's own
+  infrastructure POSTs to, unauthenticated, claiming "here is the answer to order X". It is
+  included here to prove the negative: an unsigned or unmatched payload must never be able to
+  change a stored report.
+
+  The real gates, in order (see `apps/api/src/routes/provider-feedback.ts`):
+    1. The named provider must exist and support webhooks (`beta` does; unconfigured → 404).
+    2. Its adapter must verify an HMAC signature over the RAW request bytes
+       (`x-dhru-signature` header) using a secret only we and the supplier share.
+    3. The `reference_id` must match an order WE placed and that is still open — otherwise the
+       response is a bare 202 with no further action, so a forger cannot tell which check they
+       almost hit.
+
+  A signed, matched request is not exercisable from Bruno without a live async order and a shared
+  secret, so it is not modelled here — see `packages/providers/test/webhook.test.ts` for that path
+  under full control.
+}

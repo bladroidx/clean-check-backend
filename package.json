@@ -16,13 +16,15 @@
     "test:watch": "vitest",
     "test:sentinel": "vitest run apps/api/test/sentinel.test.ts",
     "test:integration": "echo 'Integration lane: start Postgres, apply db/migrations, then run the smoke path. See README.' && exit 0",
-    "api:test": "cd bruno && bru run --env Local -r",
+    "api:test": "cd bruno && bru run --env Local -r --exclude-tags paid",
     "schema:emit": "npm -w @imei-check/contract run schema:emit",
     "schema:diff": "node scripts/schema-diff.mjs",
     "lint": "eslint . --max-warnings 0",
     "boundaries": "depcruise --config .dependency-cruiser.cjs packages apps",
     "dev": "npm -w @imei-check/api run dev",
-    "dev:worker": "npm -w @imei-check/worker run dev"
+    "dev:worker": "npm -w @imei-check/worker run dev",
+    "api:test:paid": "cd bruno && bru run --env Local -r --tags paid --env-var \"apiKey=${BRUNO_API_KEY:?set BRUNO_API_KEY to a seeded dev key first}\"",
+    "seed:dev": "node scripts/seed-dev-tenant.mjs"
   },
   "devDependencies": {
     "@types/js-yaml": "4.0.9",

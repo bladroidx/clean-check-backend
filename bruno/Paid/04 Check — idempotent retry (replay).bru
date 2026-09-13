@@ -1,0 +1,50 @@
+meta {
+  name: Check — idempotent retry (replay)
+  type: http
+  seq: 4
+  tags: [
+    paid
+  ]
+}
+
+post {
+  url: {{baseUrl}}/v1/checks
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+  authorization: Bearer {{apiKey}}
+  idempotency-key: {{retryIdempotencyKey}}
+}
+
+body:json {
+  {
+    "imei": "{{validImei}}",
+    "capabilities": ["identity.model"]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("returns the SAME check as the first call", function () {
+    // A retried paid check that runs again charges twice; one that answers differently breaks
+    // the promise the Idempotency-Key header makes.
+    expect(res.getBody().check_id).to.equal(bru.getVar("firstCheckId"));
+  });
+
+  test("does not charge a second time", function () {
+    expect(res.getBody().billing.credits_remaining).to.equal(bru.getVar("balanceAfterFirstCall"));
+  });
+}
+
+docs {
+  Run **03 Check — idempotent retry (first call)** first — it generates the shared
+  `retryIdempotencyKey` and records what it charged. This request replays the identical
+  `Idempotency-Key`, same IMEI, same capabilities, and the response must be the FIRST response
+  replayed verbatim, not a second paid check.
+}

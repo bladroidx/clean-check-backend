@@ -2,6 +2,9 @@ meta {
   name: Check — full report
   type: http
   seq: 1
+  tags: [
+    paid
+  ]
 }
 
 post {
@@ -86,6 +89,9 @@ tests {
       }
     }
   });
+
+  // Saved for "Check — fetch by id" to GET this same check back.
+  bru.setVar("lastCheckId", res.getBody().check_id);
 }
 
 docs {

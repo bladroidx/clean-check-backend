@@ -154,20 +154,44 @@ sudo snap install bruno             # Linux
 winget install Bruno.Bruno          # Windows
 ```
 
-**2. Start the API:**
+**2. Start the API** — the free tier alone needs nothing but a pepper:
 
 ```bash
 npm ci && npm run build
 SERVER_PEPPER="$(head -c 48 /dev/urandom | base64)" npm run dev
 ```
 
-**3. Open the collection** — in Bruno, **Collection → Open Collection**, and pick the `bruno/`
+`Health`, `Free tier`, `Meta` and `Internal` all work against this. **The `Paid` and `Account`
+folders will 404** until the server is started with `DATABASE_URL` set too — the routes aren't
+registered at all without a database (see `apps/api/src/app.ts`), so it isn't a config problem to
+debug, it's the free-tier mode working as designed. To get the paid routes:
+
+```bash
+docker run -d --name imei-pg -e POSTGRES_USER=imei -e POSTGRES_PASSWORD=imei \
+  -e POSTGRES_DB=imei_check -p 5432:5432 postgres:17-alpine
+# apply db/migrations/*.sql to it (or `docker compose up --build`, which does this for you)
+
+DATABASE_URL="postgres://imei:imei@localhost:5432/imei_check" \
+  SERVER_PEPPER="$(head -c 48 /dev/urandom | base64)" npm run dev
+```
+
+**3. Get a dev API key** — the `Paid` and `Account` folders need one:
+
+```bash
+DATABASE_URL="postgres://imei:imei@localhost:5432/imei_check" npm run seed:dev
+```
+
+Prints a fresh key with 1000 credits on a tenant called `ten_dev`. In Bruno, open the **Local**
+environment (bottom-right, or the gear icon) and paste it into the `apiKey` variable — it's
+declared `vars:secret`, so Bruno keeps it out of the committed `.bru` file.
+
+**4. Open the collection** — in Bruno, **Collection → Open Collection**, and pick the `bruno/`
 folder in this repo.
 
-**4. Pick the environment** — top-right dropdown → **Local**. It sets `baseUrl` to
+**5. Pick the environment** — top-right dropdown → **Local**. It sets `baseUrl` to
 `http://localhost:3000` and holds the test IMEIs.
 
-**5. Hit Run** on any request. Start with `Health / healthz`, then `Free tier / Validate — known
+**6. Hit Run** on any request. Start with `Health / healthz`, then `Free tier / Validate — known
 device`.
 
 ### What's in it
@@ -176,27 +200,41 @@ device`.
 |---|---|---|
 | **Health** | `healthz`, `readyz` | nothing |
 | **Free tier** | validate a known device · an unknown TAC · a checksum failure · dual-SIM clipboard text · wrong length · TAC lookup · TAC not found | nothing |
-| **Meta** | attributions, OpenAPI document, metrics | nothing |
-| **Paid** | full report · idempotent retry · capabilities preview · unauthenticated | `DATABASE_URL` + `apiKey` |
+| **Meta** | attributions, OpenAPI document | nothing |
+| **Internal** | supplier feedback webhook rejects an unsigned payload | nothing |
+| **Paid** | full report · fetch by id · idempotent retry (first call + replay) · capabilities preview · unauthenticated · metrics | `DATABASE_URL` + `apiKey` |
 | **Account** | balance and ledger · register a webhook | `DATABASE_URL` + `apiKey` |
+
+`/metrics` lives under **Paid**, not **Meta**, because it is currently registered alongside the
+account routes (`apps/api/src/routes/account.ts`) and so only exists when `DATABASE_URL` is set —
+even though it needs no API key itself. Worth reconsidering: a process-health scrape shouldn't
+need the paid stack configured.
 
 Every request carries assertions, so the collection doubles as an executable check of the rules
 this service must never break — an unknown TAC is `inconclusive` and never `pass`; no response
 contains the full 15-digit number; every section carries `coverage` and `checked_at`; `/readyz`
-never depends on a provider.
+never depends on a provider; a well-formed authorised request returns 200 even when every section
+is `unavailable`; a retried check does not charge twice.
 
 ### Run the whole collection from the terminal
 
-No GUI needed, and it works in CI:
+No GUI needed, and it works in CI. Split in two because the paid half needs a database and a key:
 
 ```bash
-npm run api:test
+npm run api:test              # free tier + meta + health + internal — no setup needed
+BRUNO_API_KEY=imc_test_... npm run api:test:paid   # paid + account — needs DATABASE_URL running
 ```
 
 ```
-Requests   11 (11 Passed)
-Tests      14/14
+npm run api:test
+Requests   12 (12 Passed)
+Tests      16/16
 Assertions 26/26
+
+npm run api:test:paid
+Requests   9 (9 Passed)
+Tests      22/22
+Assertions 9/9
 ```
 
 ### Notes
@@ -207,6 +245,7 @@ Assertions 26/26
 - All the numbers are synthetic — Luhn-valid, allocated to no real handset.
 - **Health**, **Free tier** and **Meta** need no key. **Paid** and **Account** need `apiKey` set in
   the Local environment — it is declared as a secret var, so Bruno never writes it to the file.
+  `npm run seed:dev` (needs `DATABASE_URL`) prints a fresh one, on a tenant with 1000 credits.
 - Prefer curl or an OpenAPI-aware client? `/openapi.json` serves the generated document and
   `/docs` serves a browsable UI.
 

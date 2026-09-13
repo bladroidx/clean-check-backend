@@ -1,7 +1,10 @@
 meta {
   name: Metrics
   type: http
-  seq: 3
+  seq: 7
+  tags: [
+    paid
+  ]
 }
 
 get {
@@ -29,6 +32,12 @@ tests {
 }
 
 docs {
+  Lives under Paid, not Meta: `/metrics` is currently registered inside `accountRoutes`
+  (apps/api/src/routes/account.ts), which only exists when the server has DATABASE_URL. It does
+  not need an API key -- it has no auth check at all, unlike every other route in this folder --
+  it just happens to be wired up alongside the routes that do. Worth reconsidering: a Prometheus
+  scraper monitoring process health shouldn't need a paid stack to be configured.
+
   Prometheus exposition. Label cardinality is a correctness question here, not a cost one: a label
   carrying an IMEI, a check id or a tenant-supplied string would either leak or explode the series
   count.
