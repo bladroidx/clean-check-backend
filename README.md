@@ -171,14 +171,19 @@ docker run -d --name imei-pg -e POSTGRES_USER=imei -e POSTGRES_PASSWORD=imei \
   -e POSTGRES_DB=imei_check -p 5432:5432 postgres:17-alpine
 # apply db/migrations/*.sql to it (or `docker compose up --build`, which does this for you)
 
-DATABASE_URL="postgres://imei:imei@localhost:5432/imei_check" \
-  SERVER_PEPPER="$(head -c 48 /dev/urandom | base64)" npm run dev
+cp .env.example .env    # then fill in DATABASE_URL and SERVER_PEPPER
+npm run dev
 ```
+
+`npm run dev` and `npm run start` both load `.env` from the repo root automatically (via Node's
+`--env-file-if-exists`) — copy it once and every future `npm run dev` has the paid routes, no
+re-exporting per shell session. Prefer a one-off instead? Env vars on the command line still take
+priority: `DATABASE_URL=... SERVER_PEPPER=... npm run dev`.
 
 **3. Get a dev API key** — the `Paid` and `Account` folders need one:
 
 ```bash
-DATABASE_URL="postgres://imei:imei@localhost:5432/imei_check" npm run seed:dev
+npm run seed:dev    # reads DATABASE_URL from .env
 ```
 
 Prints a fresh key with 1000 credits on a tenant called `ten_dev`. In Bruno, open the **Local**

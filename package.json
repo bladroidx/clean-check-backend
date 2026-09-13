@@ -24,7 +24,7 @@
     "dev": "npm -w @imei-check/api run dev",
     "dev:worker": "npm -w @imei-check/worker run dev",
     "api:test:paid": "cd bruno && bru run --env Local -r --tags paid --env-var \"apiKey=${BRUNO_API_KEY:?set BRUNO_API_KEY to a seeded dev key first}\"",
-    "seed:dev": "node scripts/seed-dev-tenant.mjs"
+    "seed:dev": "node --env-file-if-exists=.env scripts/seed-dev-tenant.mjs"
   },
   "devDependencies": {
     "@types/js-yaml": "4.0.9",

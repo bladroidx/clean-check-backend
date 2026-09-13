@@ -310,7 +310,12 @@ can help sell a stolen phone and isn't.
   registers `checkRoutes`/`accountRoutes`/`providerFeedbackRoutes` when a `services` object is
   passed in. Running without a database is a *supported* mode (the free tier), not a broken one —
   but the failure mode is a plain 404 on every paid route (`GET /v1/balance` included), which reads
-  exactly like a routing bug until you remember this.
+  exactly like a routing bug until you remember this. `npm run dev` and `npm run start` load `.env`
+  from the repo root automatically (`node --env-file-if-exists=.env`, wired into
+  `apps/api/package.json` and `apps/worker/package.json`) — copy `.env.example` once and this stops
+  being something you have to remember per shell session. **This does not run in Docker**: the
+  image's `CMD` invokes `node apps/api/dist/server.js` directly, bypassing `npm run start` and its
+  flag entirely, so compose's `environment:` block is still how the container gets its config.
 - **`GET /metrics` is one of those paid routes**, even though it needs no API key. It's registered
   inside `accountRoutes` alongside the routes that genuinely require a tenant, so it inherits their
   "only exists with `DATABASE_URL`" gate for no reason connected to its own purpose. A Prometheus
