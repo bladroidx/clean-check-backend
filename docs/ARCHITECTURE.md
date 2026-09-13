@@ -308,7 +308,14 @@ can help sell a stolen phone and isn't.
 
 - **The paid routes don't exist unless `DATABASE_URL` is set.** `apps/api/src/app.ts` only
   registers `checkRoutes`/`accountRoutes`/`providerFeedbackRoutes` when a `services` object is
-  passed in. Running without a database is a *supported* mode (the free tier), not a broken one.
+  passed in. Running without a database is a *supported* mode (the free tier), not a broken one —
+  but the failure mode is a plain 404 on every paid route (`GET /v1/balance` included), which reads
+  exactly like a routing bug until you remember this.
+- **`GET /metrics` is one of those paid routes**, even though it needs no API key. It's registered
+  inside `accountRoutes` alongside the routes that genuinely require a tenant, so it inherits their
+  "only exists with `DATABASE_URL`" gate for no reason connected to its own purpose. A Prometheus
+  scraper monitoring process health in free-tier mode currently gets a 404. Known, not yet fixed —
+  see the note in `bruno/collection.bru` and the README's Bruno table.
 - **`apps/worker` refuses to start without `DATABASE_URL`** — there's nothing for it to do in the
   free tier, so it exits rather than idling.
 - **A provider with no credentials configured is simply not built** — not built-and-failing. See
