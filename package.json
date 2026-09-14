@@ -23,7 +23,7 @@
     "boundaries": "depcruise --config .dependency-cruiser.cjs packages apps",
     "dev": "npm -w @imei-check/api run dev",
     "dev:worker": "npm -w @imei-check/worker run dev",
-    "api:test:paid": "cd bruno && bru run --env Local -r --tags paid --env-var \"apiKey=${BRUNO_API_KEY:?set BRUNO_API_KEY to a seeded dev key first}\"",
+    "api:test:paid": "cd bruno && bru run --env Local -r --tags paid",
     "seed:dev": "node --env-file-if-exists=.env scripts/seed-dev-tenant.mjs"
   },
   "devDependencies": {
