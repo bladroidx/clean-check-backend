@@ -5,7 +5,15 @@
       "Bash(npm run *)",
       "Bash(npm audit *)",
       "Bash(npx tsc *)",
-      "Bash(npx vitest *)"
+      "Bash(npx vitest *)",
+      "Bash(xargs ls -la)",
+      "Bash(xargs grep -l \"sentinel\\\\|SENTINEL\")",
+      "Bash(xargs grep -l \"creditsCharged\\\\|credits_charged\\\\|billable\")",
+      "Bash(xargs grep -l \"unrecognised_provider_value\\\\|lexicon\")",
+      "Bash(xargs grep -l \"webhook\\\\|poller\\\\|async.*order\\\\|provider_orders\")",
+      "Bash(xargs grep -l \"charge\\\\|unavailable\\\\|inconclusive\")",
+      "Bash(xargs grep -l \"poller\\\\|poll.*pending\")",
+      "Bash(xargs grep -l \"chargeFor\\\\|reserve\\\\|settle\")"
     ]
   }
 }
