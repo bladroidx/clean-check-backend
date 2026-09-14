@@ -1,6 +1,7 @@
 import { InMemoryTacDirectory } from '@imei-check/identity';
 import { buildApp, type App } from '../src/app.js';
 import { createLogger } from '../src/lib/log.js';
+import type { DatabaseProbe } from '../src/routes/health.js';
 
 /** Luhn-valid, allocated to nobody. Used to prove no raw IMEI survives anywhere. */
 export const SENTINEL = '353104112345676';
@@ -12,7 +13,10 @@ export interface CapturedLogs {
 }
 
 /** `extra` registers additional routes before ready(), for exercising the error handler. */
-export async function makeApp(extra?: (app: App) => void): Promise<{ app: App; logs: CapturedLogs }> {
+export async function makeApp(
+  extra?: (app: App) => void,
+  options: { databaseProbe?: DatabaseProbe } = {},
+): Promise<{ app: App; logs: CapturedLogs }> {
   const lines: string[] = [];
   // The REAL logger, tripwire included -- a plain pino here would let a leak through the test.
   const logger = createLogger({
@@ -30,7 +34,11 @@ export async function makeApp(extra?: (app: App) => void): Promise<{ app: App; l
     'test attribution',
   );
 
-  const app = await buildApp({ logger, tacDirectory });
+  const app = await buildApp({
+    logger,
+    tacDirectory,
+    ...(options.databaseProbe !== undefined ? { databaseProbe: options.databaseProbe } : {}),
+  });
   extra?.(app);
   await app.ready();
   return { app, logs: { lines, raw: () => lines.join('\n') } };

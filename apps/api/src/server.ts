@@ -4,7 +4,7 @@ import { createLogger } from './lib/log.js';
 import { loadTacDirectory } from './lib/tac.js';
 import { Metrics } from '@imei-check/core';
 import { MemoryRepositories } from '@imei-check/core';
-import { PgRepositories, createPool } from '@imei-check/core';
+import { PgRepositories, checkDatabase, createPool } from '@imei-check/core';
 import { buildProviders, feedbackUrlFor } from './providers/build.js';
 import { buildServices } from './services.js';
 import type { Repositories } from '@imei-check/core';
@@ -25,15 +25,15 @@ logger.info(
  * log at startup and not disguised: the paid routes are simply absent, and a caller gets a 404
  * rather than a 500 that suggests we tried and failed.
  */
-const repos: Repositories | undefined =
+const pool =
   config.DATABASE_URL !== undefined
-    ? new PgRepositories(
-        createPool(config.DATABASE_URL, {
-          // Logged, never fatal: a database failover must not become an API outage.
-          onError: (error) => logger.error({ err: error }, 'database pool error (connection dropped)'),
-        }),
-      )
+    ? createPool(config.DATABASE_URL, {
+        // Logged, never fatal: a database failover must not become an API outage.
+        onError: (error) => logger.error({ err: error }, 'database pool error (connection dropped)'),
+      })
     : undefined;
+
+const repos: Repositories | undefined = pool !== undefined ? new PgRepositories(pool) : undefined;
 
 const metrics = new Metrics();
 const built = buildProviders(config);
@@ -68,6 +68,7 @@ const app = await buildApp({
   logger,
   tacDirectory,
   ...(services !== undefined ? { services } : {}),
+  ...(pool !== undefined ? { databaseProbe: () => checkDatabase(pool) } : {}),
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

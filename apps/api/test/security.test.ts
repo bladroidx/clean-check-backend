@@ -6,7 +6,7 @@ import { MemoryRepositories, generateTenantSalt } from '@imei-check/core';
 import { CLEAN, FakeProvider, idempotencyKey, makePaidApp } from './paid-helpers.js';
 import { SENTINEL } from './helpers.js';
 import { EnumerationGuard, bucketOf, levelFor, DEFAULT_POLICY } from '../src/abuse/enumeration.js';
-import { TokenBucketLimiter } from '../src/abuse/ratelimit.js';
+import { ConcurrencyGate, TokenBucketLimiter } from '../src/abuse/ratelimit.js';
 import { isPrivateHost } from '../src/routes/account.js';
 import { bearerFrom, generateApiKey, hashApiKey, looksLikeApiKey } from '../src/auth/keys.js';
 
@@ -252,6 +252,108 @@ describe('rate limiting', () => {
     now += 10_000;
     expect(limiter.sweep(5_000)).toBe(1);
     expect(limiter.size).toBe(0);
+  });
+});
+
+/**
+ * Depth, as distinct from rate.
+ *
+ * The token bucket smooths a burst over time and says nothing about how many checks may be open at
+ * once. A retry loop can sit inside the rate limit and still hold a hundred checks simultaneously,
+ * each one occupying a pool connection and a supplier call.
+ */
+describe('per-tenant concurrency', () => {
+  it('refuses past the limit and frees the slot on release', () => {
+    const gate = new ConcurrencyGate();
+    expect(gate.tryAcquire('ten_a', 2)).toBe(true);
+    expect(gate.tryAcquire('ten_a', 2)).toBe(true);
+    expect(gate.tryAcquire('ten_a', 2)).toBe(false);
+
+    gate.release('ten_a');
+    expect(gate.tryAcquire('ten_a', 2)).toBe(true);
+  });
+
+  it('counts each tenant separately', () => {
+    const gate = new ConcurrencyGate();
+    expect(gate.tryAcquire('ten_a', 1)).toBe(true);
+    expect(gate.tryAcquire('ten_a', 1)).toBe(false);
+    // One tenant's depth must not become another tenant's outage.
+    expect(gate.tryAcquire('ten_b', 1)).toBe(true);
+  });
+
+  it('forgets a tenant at zero so it cannot leak', () => {
+    // Unlike the token bucket this needs no sweep, which is only true if release deletes the key.
+    const gate = new ConcurrencyGate();
+    gate.tryAcquire('ten_a', 1);
+    expect(gate.size).toBe(1);
+    gate.release('ten_a');
+    expect(gate.size).toBe(0);
+    expect(gate.inFlightFor('ten_a')).toBe(0);
+  });
+
+  it('never drops below zero on an unbalanced release', () => {
+    const gate = new ConcurrencyGate();
+    gate.release('ten_a');
+    gate.release('ten_a');
+    expect(gate.inFlightFor('ten_a')).toBe(0);
+    expect(gate.tryAcquire('ten_a', 1)).toBe(true);
+  });
+
+  it('refuses a check past the limit and leaves no idempotency claim behind', async () => {
+    const harness = await makePaidApp({ credits: 1000 });
+
+    // Fill every slot, so the next check has nowhere to go.
+    for (let i = 0; i < harness.services.maxConcurrentChecks; i += 1) {
+      expect(harness.services.concurrency.tryAcquire('ten_test', harness.services.maxConcurrentChecks)).toBe(true);
+    }
+
+    const key = idempotencyKey();
+    const refused = await harness.app.inject({
+      method: 'POST',
+      url: '/v1/checks',
+      headers: { ...harness.auth(), 'idempotency-key': key },
+      payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
+    });
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json().error.code).toBe('too_many_concurrent_checks');
+
+    // The reason the gate is taken BEFORE the idempotency claim. Had the claim been written, the
+    // retry below would answer `check_in_progress` for ever and that key would be dead.
+    for (let i = 0; i < harness.services.maxConcurrentChecks; i += 1) {
+      harness.services.concurrency.release('ten_test');
+    }
+    const retried = await harness.app.inject({
+      method: 'POST',
+      url: '/v1/checks',
+      headers: { ...harness.auth(), 'idempotency-key': key },
+      payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
+    });
+    expect(retried.statusCode).toBe(200);
+
+    await harness.app.close();
+  });
+
+  it('releases the slot when the check throws, not merely when it fails', async () => {
+    const harness = await makePaidApp({ credits: 1000 });
+
+    // A returned `failed` outcome is NOT this path: runCheck handles it and answers 200 with an
+    // `unavailable` section. Only a genuine throw exercises the `finally`, and the `finally` is
+    // the whole reason a slot cannot leak -- so the assertion has to reach it.
+    harness.repos.idempotency.complete = async () => {
+      throw new Error('storage went away mid-check');
+    };
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/v1/checks',
+      headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
+      payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
+    });
+
+    expect(response.statusCode).toBe(500);
+    // A slot leaked per thrown check silently throttles the tenant to nothing over a day.
+    expect(harness.services.concurrency.inFlightFor('ten_test')).toBe(0);
+    await harness.app.close();
   });
 });
 

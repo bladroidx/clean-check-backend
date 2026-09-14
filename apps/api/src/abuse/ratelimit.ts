@@ -82,3 +82,53 @@ export class TokenBucketLimiter {
     return this.buckets.size;
   }
 }
+
+/**
+ * How many paid checks one tenant may have in flight at once.
+ *
+ * The token bucket smooths a burst over time; it does nothing about depth. A client retry loop can
+ * sit inside the rate limit and still hold a hundred checks open simultaneously. Credits remain
+ * the hard ceiling on spend -- this is the ceiling on how fast that spend can be drawn down, and
+ * on how much of a supplier's rate limit one tenant can occupy before every other tenant starts
+ * reading `unavailable` through no fault of their own.
+ *
+ * Not a connection-pool control: `runCheck` does not hold a connection across the supplier call,
+ * only across the short reserve and settle transactions, so this number and the pool's `max` are
+ * independent. If that ever stops being true they have to be reasoned about together.
+ */
+export const MAX_CONCURRENT_PAID_CHECKS = 8;
+
+/**
+ * Per-tenant in-flight counter.
+ *
+ * In-process, with the same caveat as the token bucket: N replicas means N times the depth. That
+ * is a real limitation and it is still worth having, because the failure it prevents -- one tenant
+ * exhausting the pool for everybody -- is per-process in the first place.
+ *
+ * Unlike the bucket this needs no sweep: a key is deleted when its count reaches zero, so the map
+ * holds only tenants with work actually running.
+ */
+export class ConcurrencyGate {
+  private readonly inFlight = new Map<string, number>();
+
+  tryAcquire(key: string, limit: number): boolean {
+    const current = this.inFlight.get(key) ?? 0;
+    if (current >= limit) return false;
+    this.inFlight.set(key, current + 1);
+    return true;
+  }
+
+  release(key: string): void {
+    const current = this.inFlight.get(key) ?? 0;
+    if (current <= 1) this.inFlight.delete(key);
+    else this.inFlight.set(key, current - 1);
+  }
+
+  inFlightFor(key: string): number {
+    return this.inFlight.get(key) ?? 0;
+  }
+
+  get size(): number {
+    return this.inFlight.size;
+  }
+}

@@ -102,90 +102,118 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
           .update(`${imei.hmac(services.pepper)}|${[...requested].sort().join(',')}`, 'utf8')
           .digest('hex');
 
-        const claim = await services.repos.idempotency.claim({
-          tenantId: tenant.id,
-          key: idempotencyKey,
-          requestDigest,
-        });
-
-        if (!claim.claimed) {
-          const existing = claim.existing;
-          if (existing.requestDigest !== requestDigest) {
-            return reply.code(409).send({
+        /**
+         * Depth, where the token bucket above is rate.
+         *
+         * Taken BEFORE the idempotency claim on purpose: refusing after claiming would leave a
+         * claimed row with no stored response, and every retry of that key would then answer
+         * `check_in_progress` forever. Refusing first leaves nothing behind to retry around.
+         */
+        if (!services.concurrency.tryAcquire(tenant.id, services.maxConcurrentChecks)) {
+          return reply
+            .code(429)
+            .header('retry-after', '1')
+            .send({
               error: {
-                code: 'idempotency_key_reused',
+                code: 'too_many_concurrent_checks',
                 message:
-                  'This Idempotency-Key was already used for a different request. Use a new key.',
+                  `At most ${services.maxConcurrentChecks} checks may be in flight at once on ` +
+                  'this account. Retry when one finishes.',
                 request_id: request.id,
               },
             });
-          }
-          if (existing.responseBody === undefined || existing.responseBody === null) {
-            // The first attempt is still in flight. Telling the client to retry is honest and
-            // costs nothing; returning a half-built report would not be.
-            return reply.code(409).send({
-              error: {
-                code: 'check_in_progress',
-                message: 'A check with this Idempotency-Key is still running. Retry shortly.',
-                request_id: request.id,
-              },
-            });
-          }
-          // The stored first response, replayed verbatim. Re-running it would charge twice;
-          // recomputing it could answer differently for the same key.
-          return reply.code(200).send(existing.responseBody as CheckReport);
         }
 
-        const guard = await services.enumeration.observe({
-          tenantId: tenant.id,
-          tac: imei.typeAllocationCode,
-          imeiDigits: imei.digits,
-          now: new Date(),
-        });
-
-        if (guard.level === 'suspended') {
-          return reply.code(429).send({
-            error: {
-              code: 'account_restricted',
-              message:
-                'Paid lookups are suspended on this account after an unusual volume of sequential ' +
-                'IMEIs. Contact support.',
-              request_id: request.id,
-            },
-          });
-        }
-
-        const report = await runCheck(
-          {
-            repos: services.repos,
-            router: services.router,
-            cache: services.cache,
-            tacDirectory: app.tacDirectory,
-            metrics: services.metrics,
-          },
-          {
+        try {
+          const claim = await services.repos.idempotency.claim({
             tenantId: tenant.id,
-            tenantSalt: tenant.imeiSalt,
-            imei,
-            imeiHash: imei.hmac(services.pepper),
-            capabilities: requested,
-            maxAgeSeconds: request.body.max_age_seconds,
-            idempotencyKey,
-            restriction: guard.level,
-            signal: toSignal(request.raw),
-          },
-        );
+            key: idempotencyKey,
+            requestDigest,
+          });
 
-        await services.repos.idempotency.complete(tenant.id, idempotencyKey, {
-          checkId: report.check_id,
-          statusCode: 200,
-          responseBody: report,
-        });
+          if (!claim.claimed) {
+            const existing = claim.existing;
+            if (existing.requestDigest !== requestDigest) {
+              return reply.code(409).send({
+                error: {
+                  code: 'idempotency_key_reused',
+                  message:
+                    'This Idempotency-Key was already used for a different request. Use a new key.',
+                  request_id: request.id,
+                },
+              });
+            }
+            if (existing.responseBody === undefined || existing.responseBody === null) {
+              // The first attempt is still in flight. Telling the client to retry is honest and
+              // costs nothing; returning a half-built report would not be.
+              return reply.code(409).send({
+                error: {
+                  code: 'check_in_progress',
+                  message: 'A check with this Idempotency-Key is still running. Retry shortly.',
+                  request_id: request.id,
+                },
+              });
+            }
+            // The stored first response, replayed verbatim. Re-running it would charge twice;
+            // recomputing it could answer differently for the same key.
+            return reply.code(200).send(existing.responseBody as CheckReport);
+          }
 
-        await services.enqueueCompletionWebhook(tenant.id, report);
+          const guard = await services.enumeration.observe({
+            tenantId: tenant.id,
+            tac: imei.typeAllocationCode,
+            imeiDigits: imei.digits,
+            now: new Date(),
+          });
 
-        // 200 even when every section is unavailable. Invariant 7.
-        return reply.code(200).send(report);
+          if (guard.level === 'suspended') {
+            return reply.code(429).send({
+              error: {
+                code: 'account_restricted',
+                message:
+                  'Paid lookups are suspended on this account after an unusual volume of sequential ' +
+                  'IMEIs. Contact support.',
+                request_id: request.id,
+              },
+            });
+          }
+
+          const report = await runCheck(
+            {
+              repos: services.repos,
+              router: services.router,
+              cache: services.cache,
+              tacDirectory: app.tacDirectory,
+              metrics: services.metrics,
+            },
+            {
+              tenantId: tenant.id,
+              tenantSalt: tenant.imeiSalt,
+              imei,
+              imeiHash: imei.hmac(services.pepper),
+              capabilities: requested,
+              maxAgeSeconds: request.body.max_age_seconds,
+              idempotencyKey,
+              restriction: guard.level,
+              signal: toSignal(request.raw),
+            },
+          );
+
+          await services.repos.idempotency.complete(tenant.id, idempotencyKey, {
+            checkId: report.check_id,
+            statusCode: 200,
+            responseBody: report,
+          });
+
+          await services.enqueueCompletionWebhook(tenant.id, report);
+
+          // 200 even when every section is unavailable. Invariant 7.
+          return reply.code(200).send(report);
+        } finally {
+          // `finally`, not a call on each exit path: a throw from runCheck that did not release
+          // would permanently consume one of the tenant's slots until the process restarted.
+          services.concurrency.release(tenant.id);
+        }
       },
     );
 

@@ -161,6 +161,38 @@ describe('DHRU legacy transport', () => {
     if (outcome.kind === 'failed') expect(outcome.reason).toBe('malformed_response');
   });
 
+  /**
+   * A WAF challenge arriving with HTTP 200.
+   *
+   * The most common way a supplier "fails" in practice, and the most dangerous shape it can take:
+   * the status line says success, so any handler keying off the status code proceeds to look for
+   * fields in an HTML page, finds none, and reports a device with nothing wrong found.
+   */
+  it('degrades a WAF challenge served with HTTP 200 to failed, never to an answer', () => {
+    const outcome = legacy.interpret(fixture('legacy-waf-html-200.txt'), blacklistService);
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') expect(outcome.reason).toBe('malformed_response');
+  });
+
+  /**
+   * SUCCESS carrying an error message rather than a result.
+   *
+   * `MESSAGE` is a legitimate fallback for the result blob, so this body does parse and does reach
+   * the normaliser -- it simply contains prose with no recognisable pairs in it. What must NOT
+   * happen is a field being invented from it: zero fields becomes `inconclusive` downstream in
+   * `assemble`, while a single fabricated field would become a pass.
+   *
+   * This pins the transport behaviour only. Whether `inconclusive(device_not_found_in_registry)`
+   * is the RIGHT reading of a supplier saying "I am temporarily unavailable" is a separate and
+   * open question -- it is currently billed at list price for what is really a supplier failure.
+   */
+  it('invents no field from a SUCCESS that wraps an error message', () => {
+    const outcome = legacy.interpret(fixture('legacy-success-wrapping-error.json'), blacklistService);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    expect(outcome.fields).toEqual([]);
+  });
+
   it('refuses a service with no registered lexicon instead of returning zero fields', () => {
     const orphan = { ...blacklistService, lexiconId: 'no-such-lexicon' };
     const outcome = legacy.interpret(fixture('legacy-blacklist-clean.json'), orphan);

@@ -76,6 +76,78 @@ export function createPool(databaseUrl: string, options: PoolOptions = {}): pg.P
   return pool;
 }
 
+/**
+ * The migration this build of the code requires.
+ *
+ * Readiness checks this against what dbmate has actually applied, which is what catches the deploy
+ * that rolled the image forward and the schema not at all -- the failure mode where the service
+ * reports ready and then 500s every paid check.
+ *
+ * It is a constant rather than a read of `db/migrations/` because the deploy artefact does not
+ * ship that directory: the code, not the filesystem, is what knows which schema it needs. Keeping
+ * it honest is a test's job rather than a comment's -- `schema-version.test.ts` fails the moment a
+ * migration is added without bumping it.
+ */
+export const REQUIRED_SCHEMA_VERSION = '20260913000001';
+
+export interface DatabaseReadiness {
+  readonly reachable: boolean;
+  readonly migrationsCurrent: boolean;
+  readonly appliedVersion: string | undefined;
+}
+
+/**
+ * Readiness probe for the paid path.
+ *
+ * Bounded by its own timeout rather than the pool's: an unresponsive database must make `/readyz`
+ * answer 503 quickly, not hang until the orchestrator's probe deadline and read as a timeout of
+ * the whole process.
+ */
+export async function checkDatabase(pool: pg.Pool, timeoutMs = 2_000): Promise<DatabaseReadiness> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    /**
+     * Presence of the exact required version, NOT `max(version) >= required`.
+     *
+     * The two diverge the first time branches merge with interleaved timestamps: a later migration
+     * lands, the one this build needs does not, `max()` clears the bar, readiness says ok, and the
+     * missing table 500s every paid check -- precisely the failure this probe exists to catch. It
+     * also reports `behind` after a rollback, which the comparison form does not.
+     *
+     * `latest` is carried purely so an operator reading `/readyz` can see where the schema is.
+     */
+    const query = pool.query<{ latest: string | null; required_applied: boolean }>(
+      `SELECT (SELECT max(version) FROM schema_migrations) AS latest,
+              EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1) AS required_applied`,
+      [REQUIRED_SCHEMA_VERSION],
+    );
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('database readiness probe timed out')), timeoutMs);
+    });
+    const { rows } = await Promise.race([query, timeout]);
+    return {
+      reachable: true,
+      migrationsCurrent: rows[0]?.required_applied === true,
+      appliedVersion: rows[0]?.latest ?? undefined,
+    };
+  } catch (error) {
+    // A missing schema_migrations means dbmate has never run against this database. That is
+    // reachable-but-unmigrated, not unreachable, and the two want different operator responses.
+    if (isUndefinedTable(error)) {
+      return { reachable: true, migrationsCurrent: false, appliedVersion: undefined };
+    }
+    return { reachable: false, migrationsCurrent: false, appliedVersion: undefined };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function isUndefinedTable(error: unknown): boolean {
+  return (
+    error !== null && typeof error === 'object' && (error as { code?: unknown }).code === '42P01'
+  );
+}
+
 export class PgRepositories implements Repositories {
   readonly tenants: TenantRepo;
   readonly apiKeys: ApiKeyRepo;
@@ -138,6 +210,22 @@ class PgTenantRepo implements TenantRepo {
        ON CONFLICT (tenant_id) DO NOTHING`,
       [tenant.id],
     );
+  }
+  async listAll(): Promise<readonly Tenant[]> {
+    const { rows } = await this.pool.query<{
+      id: string;
+      name: string;
+      plan: string;
+      status: string;
+      imei_salt: string;
+    }>('SELECT id, name, plan, status, imei_salt FROM tenants ORDER BY id');
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      plan: row.plan,
+      status: row.status === 'active' ? 'active' : 'suspended',
+      imeiSalt: row.imei_salt,
+    }));
   }
 }
 

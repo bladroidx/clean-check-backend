@@ -9,7 +9,7 @@ import {
 } from 'fastify-type-provider-zod';
 import type { Logger } from 'pino';
 import type { InMemoryTacDirectory } from '@imei-check/identity';
-import { healthRoutes } from './routes/health.js';
+import { healthRoutes, type DatabaseProbe } from './routes/health.js';
 import { imeiRoutes } from './routes/imei.js';
 import { tacRoutes } from './routes/tac.js';
 import { checkRoutes } from './routes/checks.js';
@@ -33,6 +33,11 @@ export interface AppDeps {
    * degraded one: it costs nothing to run and is genuinely useful (milestone M0).
    */
   services?: AppServices;
+  /**
+   * Readiness probe for Postgres. Absent in the free offline tier, which has no database and must
+   * not report a check for one.
+   */
+  databaseProbe?: DatabaseProbe;
 }
 
 export type App = Awaited<ReturnType<typeof buildApp>>;
@@ -85,7 +90,7 @@ export async function buildApp(deps: AppDeps) {
     });
   });
 
-  await app.register(healthRoutes);
+  await app.register(healthRoutes(deps.databaseProbe));
   await app.register(imeiRoutes);
   await app.register(tacRoutes);
 

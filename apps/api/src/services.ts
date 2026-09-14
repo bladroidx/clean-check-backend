@@ -3,7 +3,12 @@ import type { Capability, CheckReport } from '@imei-check/contract';
 import { BreakerRegistry, Router, type Provider } from '@imei-check/providers';
 import { FieldCache } from '@imei-check/core';
 import { EnumerationGuard } from './abuse/enumeration.js';
-import { LIMITS, TokenBucketLimiter } from './abuse/ratelimit.js';
+import {
+  ConcurrencyGate,
+  LIMITS,
+  MAX_CONCURRENT_PAID_CHECKS,
+  TokenBucketLimiter,
+} from './abuse/ratelimit.js';
 import type { Metrics } from '@imei-check/core';
 import type { Repositories } from '@imei-check/core';
 
@@ -22,6 +27,9 @@ export interface AppServices {
   readonly metrics: Metrics;
   readonly limiter: TokenBucketLimiter;
   readonly limits: typeof LIMITS;
+  /** Depth, where `limiter` is rate. See the comment on `MAX_CONCURRENT_PAID_CHECKS`. */
+  readonly concurrency: ConcurrencyGate;
+  readonly maxConcurrentChecks: number;
   readonly enumeration: EnumerationGuard;
   readonly breakers: BreakerRegistry;
   /** `SERVER_PEPPER`. The internal hash key, never returned and never per-tenant. */
@@ -107,6 +115,8 @@ export function buildServices(options: BuildServicesOptions): AppServices {
     metrics,
     limiter: new TokenBucketLimiter(),
     limits: LIMITS,
+    concurrency: new ConcurrencyGate(),
+    maxConcurrentChecks: MAX_CONCURRENT_PAID_CHECKS,
     enumeration: new EnumerationGuard(options.repos.abuse, undefined, (level) => {
       metrics.abuseLadder.inc({ level });
     }),

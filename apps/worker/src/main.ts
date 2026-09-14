@@ -82,12 +82,14 @@ await Promise.all([
   loop('deliver-webhooks', WEBHOOK_INTERVAL_MS, () =>
     deliverWebhooks({ repos, log: (event, message) => logger.info(event, message) }),
   ),
-  loop('reconcile', RECONCILE_INTERVAL_MS, () =>
+  loop('reconcile', RECONCILE_INTERVAL_MS, async () =>
     reconcile({
       repos,
       providers,
       metrics,
-      tenantIds: [],
+      // Re-read every tick rather than at boot: a worker that has been up for a week would
+      // otherwise never assert the ledger of any tenant onboarded since it started.
+      tenantIds: (await repos.tenants.listAll()).map((t) => t.id),
       log: (event, message) => logger.warn(event, message),
     }),
   ),

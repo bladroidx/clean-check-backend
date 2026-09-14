@@ -126,6 +126,63 @@ describe('health', () => {
     const checks = (await app.inject({ method: 'GET', url: '/readyz' })).json().checks;
     expect(Object.keys(checks).some((k) => /provider|upstream|supplier/i.test(k))).toBe(false);
   });
+
+  it('reports no database check in the free offline tier', async () => {
+    // No DATABASE_URL means no database to be ready for. Reporting a check for one would invent a
+    // dependency the free tier does not have, and M0 is a supported mode rather than a degraded one.
+    const made = await makeApp();
+    app = made.app;
+    const res = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().checks.database).toBeUndefined();
+    expect(res.json().checks.migrations).toBeUndefined();
+  });
+
+  it('is ready when the database is reachable and the schema is current', async () => {
+    const made = await makeApp(undefined, {
+      databaseProbe: async () => ({
+        reachable: true,
+        migrationsCurrent: true,
+        appliedVersion: '20260913000001',
+      }),
+    });
+    app = made.app;
+    const res = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().checks).toMatchObject({ database: 'ok', migrations: 'ok' });
+  });
+
+  it('fails readiness when the database is unreachable', async () => {
+    // Without this the service reports ready during a failover and then 500s every paid check,
+    // which from outside is indistinguishable from an ordinary incident.
+    const made = await makeApp(undefined, {
+      databaseProbe: async () => ({
+        reachable: false,
+        migrationsCurrent: false,
+        appliedVersion: undefined,
+      }),
+    });
+    app = made.app;
+    const res = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().status).toBe('not_ready');
+    expect(res.json().checks.database).toBe('unreachable');
+  });
+
+  it('fails readiness when the image is ahead of the schema', async () => {
+    // The deploy that rolled the container forward and the migration not at all.
+    const made = await makeApp(undefined, {
+      databaseProbe: async () => ({
+        reachable: true,
+        migrationsCurrent: false,
+        appliedVersion: '20260912000001',
+      }),
+    });
+    app = made.app;
+    const res = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().checks).toMatchObject({ database: 'ok', migrations: 'behind' });
+  });
 });
 
 describe('GET /v1/attributions', () => {

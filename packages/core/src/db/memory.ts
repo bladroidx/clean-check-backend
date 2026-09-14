@@ -60,6 +60,9 @@ class MemoryTenantRepo implements TenantRepo {
     assertStrongTenantSalt(tenant.imeiSalt);
     this.rows.set(tenant.id, tenant);
   }
+  async listAll(): Promise<readonly Tenant[]> {
+    return [...this.rows.values()];
+  }
 }
 
 class MemoryApiKeyRepo implements ApiKeyRepo {

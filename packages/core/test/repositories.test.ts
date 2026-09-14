@@ -28,6 +28,23 @@ describe('tenants and keys', () => {
     expect(await r.tenants.byId('nope')).toBeUndefined();
   });
 
+  /**
+   * What the nightly reconciliation iterates.
+   *
+   * Suspended tenants are included deliberately: a suspended account still holds a balance, and a
+   * drift that appeared before the suspension is exactly the one nobody ever finds if the sweep
+   * skips it. An empty list here is how ledger drift went undetected entirely.
+   */
+  it('lists every tenant for reconciliation, suspended ones included', async () => {
+    const r = await repos();
+    await r.tenants.create({
+      id: 't2', name: 'Suspended', plan: 'std', status: 'suspended', imeiSalt: generateTenantSalt(),
+    });
+
+    const all = await r.tenants.listAll();
+    expect(all.map((t) => t.id).sort()).toEqual(['t1', 't2']);
+  });
+
   it('finds an API key only by its hash', async () => {
     const r = await repos();
     await r.apiKeys.insert({

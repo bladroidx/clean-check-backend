@@ -30,6 +30,12 @@ export interface ApiKeyRecord {
 export interface TenantRepo {
   byId(id: string): Promise<Tenant | undefined>;
   create(tenant: Tenant): Promise<void>;
+  /**
+   * Every tenant the nightly reconciliation must assert a ledger for. Suspended tenants are
+   * included: a suspended account still holds a balance, and a drift that appeared before the
+   * suspension is exactly the kind that never gets found if the sweep skips it.
+   */
+  listAll(): Promise<readonly Tenant[]>;
 }
 
 export interface ApiKeyRepo {
