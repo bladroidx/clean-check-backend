@@ -4,6 +4,7 @@ import {
   BUILTIN_LEXICONS,
   DhruLegacyProvider,
   DhruRestProvider,
+  Imei24Provider,
   loadCatalogueFile,
   type CatalogueService,
   type Provider,
@@ -73,6 +74,23 @@ export function buildProviders(config: Config): BuiltProviders {
       );
     } else {
       skipped.push({ providerId: 'beta', reason: 'BETA_BASE_URL/BETA_TOKEN not set' });
+    }
+  }
+
+  const imei24 = byProvider.get('imei24');
+  if (imei24 !== undefined) {
+    if (config.IMEI24_BASE_URL && config.IMEI24_API_KEY) {
+      providers.push(
+        new Imei24Provider({
+          providerId: 'imei24',
+          baseUrl: config.IMEI24_BASE_URL.replace(/\/+$/, ''),
+          apiKey: config.IMEI24_API_KEY,
+          services: imei24,
+          lexicons: BUILTIN_LEXICONS,
+        }),
+      );
+    } else {
+      skipped.push({ providerId: 'imei24', reason: 'IMEI24_BASE_URL/IMEI24_API_KEY not set' });
     }
   }
 

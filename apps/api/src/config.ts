@@ -70,6 +70,9 @@ export const ConfigSchema = z.object({
   /** Without this, inbound feedback webhooks are REFUSED rather than trusted. */
   BETA_WEBHOOK_SECRET: z.string().optional(),
 
+  IMEI24_BASE_URL: z.string().url().optional(),
+  IMEI24_API_KEY: z.string().optional(),
+
   /** Free tier limits are licensing controls as much as abuse controls (ADR-0005). */
   RATE_LIMIT_ENABLED: z.coerce.boolean().default(true),
 });
