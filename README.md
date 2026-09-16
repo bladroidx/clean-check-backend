@@ -58,28 +58,31 @@ docker compose up --build              # Postgres + migrations + API + worker
 | | |
 |---|---|
 | ✅ **M0 walking skeleton** | Free tier, contract, identity, schema, Docker, migrations. **Costs nothing to run.** |
-| ✅ **M1** | API keys, credits ledger, field cache, charge matrix, DHRU legacy provider |
-| ✅ **M2** | Second provider, failover, circuit breaker, async orders, inbound + outbound webhooks |
+| ✅ **M1** | API keys, field cache, DHRU legacy provider |
+| ✅ **M2** | Second provider, failover, circuit breaker, async orders, inbound supplier feedback webhook |
 | ✅ **M3** | `lock.carrier` · `lock.activation` · `lock.mdm` · `warranty.*` · `network.sold_by` |
-| ⬜ M4 | Apply for GSMA Device Check direct, behind the same `Provider` interface |
+| ✅ **M4 single-consumer mode** | Multi-tenant billing/credits, the abuse ladder and outbound completion webhooks were removed; this now runs as one seeded tenant/API key for a single trusted caller |
+| ⬜ M5 | Apply for GSMA Device Check direct, behind the same `Provider` interface |
 
-**Free and offline** — no key, no database, no supplier:
+**Free and offline, no database at all** — no key, no supplier, nothing costs anything:
 
 - `POST /v1/imei/validate` — parse, Luhn, mask, TAC identity
 - `GET /v1/tac/:tac` — one TAC (deliberately no bulk endpoint; see ADR-0005)
 - `GET /v1/attributions`, `/healthz`, `/readyz`, `/openapi.json`, `/docs`
 
-**Paid** — bearer API key, prepaid credits, `DATABASE_URL` required:
+This is a genuinely supported mode (milestone M0), not a degraded one — it costs nothing to run.
+
+**With `DATABASE_URL` set** — single-consumer mode: one seeded tenant/API key
+(`npm run seed:service-tenant`), Bearer auth required on *every* route including the free ones
+above, billing removed entirely (nothing is ever charged):
 
 - `POST /v1/checks` — the full report. Mandatory `Idempotency-Key`.
 - `GET /v1/checks/:id` — fetch a check, including sections answered asynchronously since
-- `POST /v1/capabilities` — what is checkable for a device and what it costs, before committing
-- `GET /v1/balance` — credits and the ledger that explains them
-- `POST /v1/webhooks` — register an endpoint for asynchronously completed checks
+- `POST /v1/capabilities` — what is checkable for a device, before running anything
 - `GET /metrics` — Prometheus
 
-Supplier credentials are optional even on the paid path. With none configured, paid sections come
-back `unavailable(provider_not_configured)` at zero cost and every contract guarantee still holds.
+Supplier credentials are optional even here. With none configured, paid-shaped sections come back
+`unavailable(provider_not_configured)` and every contract guarantee still holds.
 
 ## Layout
 
@@ -90,10 +93,10 @@ packages/providers   Provider interface, DHRU legacy + REST transports, the norm
                      the service catalogue, circuit breaker and the router that must not fail over
                      after a definite answer.
 packages/core        The domain: repositories (Postgres and in-memory), the field cache and its
-                     TTL table, the charge matrix, metrics, and assemble.ts — the ONE place a
-                     provider outcome becomes a public SectionResult.
+                     TTL table, metrics, and assemble.ts — the ONE place a provider outcome
+                     becomes a public SectionResult.
 apps/api             Fastify. Composition only.
-apps/worker          Poll async orders, deliver webhooks, reconcile the ledger, ingest TACs.
+apps/worker          Poll async (non-express) supplier orders, ingest TACs.
 db/migrations        Plain SQL, dbmate, applied as a separate init step — never on app boot.
 docs/adr             Why things are the way they are.
 testdata             Golden IMEI vectors, shared with check-this-phone.
@@ -161,10 +164,10 @@ npm ci && npm run build
 SERVER_PEPPER="$(head -c 48 /dev/urandom | base64)" npm run dev
 ```
 
-`Health`, `Free tier`, `Meta` and `Internal` all work against this. **The `Paid` and `Account`
-folders will 404** until the server is started with `DATABASE_URL` set too — the routes aren't
-registered at all without a database (see `apps/api/src/app.ts`), so it isn't a config problem to
-debug, it's the free-tier mode working as designed. To get the paid routes:
+`Health`, `Free tier`, `Meta` and `Internal` all work against this with no key at all. **The
+`Paid` folder will 404** until the server is started with `DATABASE_URL` set too — the routes
+aren't registered at all without a database (see `apps/api/src/app.ts`), so it isn't a config
+problem to debug, it's the free-tier mode working as designed. To get the paid routes:
 
 ```bash
 docker run -d --name imei-pg -e POSTGRES_USER=imei -e POSTGRES_PASSWORD=imei \
@@ -180,15 +183,17 @@ npm run dev
 re-exporting per shell session. Prefer a one-off instead? Env vars on the command line still take
 priority: `DATABASE_URL=... SERVER_PEPPER=... npm run dev`.
 
-**3. Get a dev API key** — the `Paid` and `Account` folders need one:
+**3. Get a dev API key.** Once `DATABASE_URL` is set, *every* route requires it, including
+`Free tier` and `Meta` — this service now runs single-consumer (one seeded tenant/API key, no
+signup, no billing), not multi-tenant self-serve:
 
 ```bash
 npm run seed:dev    # reads DATABASE_URL from .env
 ```
 
-Prints a fresh key with 1000 credits on a tenant called `ten_dev`. In Bruno, open the **Local**
-environment (bottom-right, or the gear icon) and paste it into the `apiKey` variable — it's
-declared `vars:secret`, so Bruno keeps it out of the committed `.bru` file.
+Prints a fresh key on a tenant called `ten_dev`. In Bruno, open the **Local** environment
+(bottom-right, or the gear icon) and paste it into the `apiKey` variable — it's declared
+`vars:secret`, so Bruno keeps it out of the committed `.bru` file.
 
 **4. Open the collection** — in Bruno, **Collection → Open Collection**, and pick the `bruno/`
 folder in this repo.
@@ -204,22 +209,19 @@ device`.
 | Folder | Requests | Needs |
 |---|---|---|
 | **Health** | `healthz`, `readyz` | nothing |
-| **Free tier** | validate a known device · an unknown TAC · a checksum failure · dual-SIM clipboard text · wrong length · TAC lookup · TAC not found | nothing |
-| **Meta** | attributions, OpenAPI document | nothing |
-| **Internal** | supplier feedback webhook rejects an unsigned payload | nothing |
+| **Free tier** | validate a known device · an unknown TAC · a checksum failure · dual-SIM clipboard text · wrong length · TAC lookup · TAC not found | nothing without a database; `apiKey` once `DATABASE_URL` is set |
+| **Meta** | attributions, OpenAPI document | `apiKey` for attributions once `DATABASE_URL` is set; the OpenAPI document never needs one |
+| **Internal** | supplier feedback webhook rejects an unsigned payload | nothing (deliberately unauthenticated; see the 3-gate check in `routes/provider-feedback.ts`) |
 | **Paid** | full report · fetch by id · idempotent retry (first call + replay) · capabilities preview · unauthenticated · metrics | `DATABASE_URL` + `apiKey` |
-| **Account** | balance and ledger · register a webhook | `DATABASE_URL` + `apiKey` |
 
-`/metrics` lives under **Paid**, not **Meta**, because it is currently registered alongside the
-account routes (`apps/api/src/routes/account.ts`) and so only exists when `DATABASE_URL` is set —
-even though it needs no API key itself. Worth reconsidering: a process-health scrape shouldn't
-need the paid stack configured.
+`/metrics` lives under **Paid** because it is only registered when `DATABASE_URL` is set (see
+`apps/api/src/app.ts`), even though it needs no API key itself.
 
 Every request carries assertions, so the collection doubles as an executable check of the rules
 this service must never break — an unknown TAC is `inconclusive` and never `pass`; no response
 contains the full 15-digit number; every section carries `coverage` and `checked_at`; `/readyz`
 never depends on a provider; a well-formed authorised request returns 200 even when every section
-is `unavailable`; a retried check does not charge twice.
+is `unavailable`; a retried check answers identically without running twice.
 
 ### Run the whole collection from the terminal
 
@@ -248,9 +250,9 @@ Assertions 9/9
   on. That is deliberate: `apps/api/test/sentinel.test.ts` sweeps the whole repo for 15-digit
   numbers, and that one file is allowlisted with its contents pinned.
 - All the numbers are synthetic — Luhn-valid, allocated to no real handset.
-- **Health**, **Free tier** and **Meta** need no key. **Paid** and **Account** need `apiKey` set in
-  the Local environment — it is declared as a secret var, so Bruno never writes it to the file.
-  `npm run seed:dev` (needs `DATABASE_URL`) prints a fresh one, on a tenant with 1000 credits.
+- **Health** and **Internal** need no key ever. Everything else needs `apiKey` set in the Local
+  environment once `DATABASE_URL` is set — it is declared as a secret var, so Bruno never writes it
+  to the file. `npm run seed:dev` (needs `DATABASE_URL`) prints a fresh one on the seeded tenant.
 - Prefer curl or an OpenAPI-aware client? `/openapi.json` serves the generated document and
   `/docs` serves a browsable UI.
 

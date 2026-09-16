@@ -63,31 +63,10 @@ export class Metrics {
     registers: [this.registry],
   });
 
-  readonly creditsCharged = new Counter({
-    name: 'imei_credits_charged_total',
-    help: 'Credits actually charged, by charge decision.',
-    labelNames: ['reason'] as const,
-    registers: [this.registry],
-  });
-
   readonly circuitState = new Gauge({
     name: 'imei_provider_circuit_open',
     help: '1 when a provider circuit is open.',
     labelNames: ['provider_id'] as const,
-    registers: [this.registry],
-  });
-
-  readonly abuseLadder = new Counter({
-    name: 'imei_abuse_restriction_total',
-    help: 'Enumeration ladder transitions.',
-    labelNames: ['level'] as const,
-    registers: [this.registry],
-  });
-
-  readonly ledgerDrift = new Gauge({
-    name: 'imei_ledger_drift_credits',
-    help: 'Cached balance minus summed ledger. Must be zero.',
-    labelNames: ['tenant_id'] as const,
     registers: [this.registry],
   });
 

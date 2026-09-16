@@ -105,6 +105,11 @@ export interface PaidHarness {
 
 export async function makePaidApp(options: {
   providers?: Provider[];
+  /**
+   * No-op: billing was removed entirely (single-consumer mode has no "on" state). Kept as an
+   * accepted, ignored option so every existing call site did not need touching for a number that
+   * no longer affects anything.
+   */
   credits?: number;
 } = {}): Promise<PaidHarness> {
   const lines: string[] = [];
@@ -132,7 +137,6 @@ export async function makePaidApp(options: {
     status: 'active',
     imeiSalt: TENANT_SALT,
   });
-  await repos.credits.topUp('ten_test', options.credits ?? 1000);
 
   const key = generateApiKey(false);
   await repos.apiKeys.insert({

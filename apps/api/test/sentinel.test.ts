@@ -99,14 +99,14 @@ describe('sentinel IMEI', () => {
    * The paid path, which is where the sentinel is most at risk.
    *
    * The free tier never sends the number anywhere. The paid path hands the raw digits to a
-   * supplier, receives free text back, writes a cache row, a ledger row, a provider_calls row and
-   * a check record, and serialises a report -- every one of which is a place the digits could
-   * land. Running the sentinel through all four arms and then grepping everything the process
-   * produced is the only way that stays true past month three.
+   * supplier, receives free text back, writes a cache row, a provider_calls row and a check
+   * record, and serialises a report -- every one of which is a place the digits could land.
+   * Running the sentinel through all four arms and then grepping everything the process produced
+   * is the only way that stays true past month three.
    */
   it('survives the whole PAID path: no response, log, cache row or stored section holds it', async () => {
     for (const outcome of [CLEAN, BLOCKED, REWORDED, TIMEOUT]) {
-      const harness = await makePaidApp({ providers: [new FakeProvider('fake', outcome)], credits: 500 });
+      const harness = await makePaidApp({ providers: [new FakeProvider('fake', outcome)] });
 
       const response = await harness.app.inject({
         method: 'POST',
@@ -125,14 +125,11 @@ describe('sentinel IMEI', () => {
       const record = await harness.repos.checks.byId('ten_test', checkId);
       expect(JSON.stringify(record)).not.toContain(SENTINEL);
 
-      const ledger = await harness.repos.credits.ledger('ten_test', 100);
-      expect(JSON.stringify(ledger)).not.toContain(SENTINEL);
-
       // The cache is keyed on the INTERNAL hash, never the digits.
       const cached = await harness.repos.cache.get(`${SENTINEL}:blacklist.status`);
       expect(cached).toBeUndefined();
 
-      // And the balance query path, and the capabilities preview.
+      // And the capabilities preview.
       const capabilities = await harness.app.inject({
         method: 'POST',
         url: '/v1/capabilities',

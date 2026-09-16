@@ -22,10 +22,10 @@ whole codebase is built to defend.
 
 Two tiers:
 
-- **Free, offline, no credits.** IMEI validation (Luhn check), device identity from a bundled
-  Type Allocation Code (TAC) directory. No network call, no database required.
-- **Paid.** Blacklist status, carrier/activation/MDM lock, warranty. Requires an API key, spends
-  prepaid credits, and calls out to supplier APIs.
+- **Free, offline.** IMEI validation (Luhn check), device identity from a bundled Type Allocation
+  Code (TAC) directory. No network call, no database required.
+- **Paid.** Blacklist status, carrier/activation/MDM lock, warranty. Requires an API key and calls
+  out to supplier APIs — "paid" names the capability tier, not a bill: billing was removed, see §7.
 
 ---
 
@@ -76,9 +76,9 @@ wasn't the original plan and what broke to make it necessary.
 | `packages/contract` | The wire format. zod schemas for every request/response shape, the closed enums (`Outcome`, `Capability`, `Reason`, `Remedy`...), and the seven cross-field invariants that a zod object schema can't express on its own. | zod only |
 | `packages/identity` | `Imei` (parse, Luhn-validate, mask, hash) and `TacDirectory`. Ported from the sibling Android app's Kotlin so both sides agree on golden test vectors. | contract's *types* only, no runtime dep |
 | `packages/providers` | Talks to suppliers. The `Provider` interface, DHRU legacy (HTML-in-JSON) and REST (bearer + webhook) transports, the extract→alias→lexicon normalisation pipeline, the circuit breaker, and the `Router` that decides which supplier to try and whether to fail over. | contract, identity |
-| `packages/core` | The domain. Repository interfaces + two implementations (Postgres, in-memory), the field cache with its TTL table, the credit charge matrix, Prometheus metrics, and `assemble.ts` — the single function that turns a supplier's answer into a public `SectionResult`. | contract, identity, providers |
-| `apps/api` | Fastify server. Routes, auth, rate limiting, the enumeration/abuse guard, and `run-check.ts` (the orchestrator that ties cache → credits → router → assemble together for one HTTP request). | everything above |
-| `apps/worker` | A separate long-running process: polls async supplier orders, delivers outbound webhooks, reconciles the ledger nightly, ingests TAC data. | everything above, **not** `apps/api` |
+| `packages/core` | The domain. Repository interfaces + two implementations (Postgres, in-memory), the field cache with its TTL table, Prometheus metrics, and `assemble.ts` — the single function that turns a supplier's answer into a public `SectionResult`. | contract, identity, providers |
+| `apps/api` | Fastify server. Routes, auth, rate limiting, and `run-check.ts` (the orchestrator that ties cache → router → assemble together for one HTTP request). | everything above |
+| `apps/worker` | A separate long-running process: polls async supplier orders, ingests TAC data. | everything above, **not** `apps/api` |
 
 ---
 
@@ -91,44 +91,36 @@ POST /v1/checks
   │
   ▼
 apps/api/src/auth/plugin.ts         Bearer key → SHA-256 lookup → tenant. Same 401 body whatever
-  │                                  went wrong (unknown/revoked/expired key look identical).
+  │                                  went wrong (unknown/revoked/expired key look identical). One
+  │                                  seeded tenant in single-consumer mode — see §7.
   ▼
-apps/api/src/routes/checks.ts       Luhn-validate the IMEI FIRST (free — kills most random
-  │                                  enumeration before it costs anything). Claim the
+apps/api/src/routes/checks.ts       Luhn-validate the IMEI FIRST (free). Claim the
   │                                  Idempotency-Key: if seen before, replay the stored response
   │                                  verbatim and stop here.
-  ▼
-apps/api/src/abuse/enumeration.ts   Record this lookup's (TAC, first-3-serial-digits) bucket.
-  │                                  Compute the abuse ladder level (none → throttled → cache_only
-  │                                  → no_paid → suspended) WITHOUT ever storing the IMEI itself.
   ▼
 apps/api/src/orchestrator/
   run-check.ts                      For each requested capability, in order:
   │
   │   1. identity.model?        → answer from the in-memory TacDirectory. Free.
   │   2. Otherwise → check packages/core/src/cache/store.ts first (keyed on the field, not the
-  │      whole response — see ADR-0004). A hit costs 20% of list price.
-  │   3. Reserve credits (packages/core — atomic, idempotent, "FOR UPDATE" under Postgres).
-  │      Partial affordability is honoured: capabilities you can't afford come back
-  │      unavailable(insufficient_credits) rather than failing the whole request.
-  │   4. Cache miss → packages/providers' Router picks the cheapest provider that covers this
+  │      whole response — see ADR-0004).
+  │   3. Cache miss → packages/providers' Router picks the cheapest provider that covers this
   │      TAC for this capability, executes it (or fails over — but ONLY on transport failure,
-  │      never after a definite answer; see §6).
-  │   5. packages/core/src/report/assemble.ts turns the ProviderOutcome into a SectionResult:
+  │      never after a definite answer; see §6). No affordability gating: billing is off, so
+  │      every requested capability simply runs.
+  │   4. packages/core/src/report/assemble.ts turns the ProviderOutcome into a SectionResult:
   │      the one place in the whole codebase that decides pass/fail/inconclusive/unavailable.
-  │   6. Settle: refund reserved-but-uncharged credits (e.g. an inconclusive caused by OUR
-  │      lexicon gap is never charged).
   ▼
 Response: a CheckReport. Always HTTP 200 if the request was well-formed and authorised — even if
-every single section came back `unavailable`. See ADR-0001.
+every single section came back `unavailable`. `billing.credits_charged` is always `0`. See ADR-0001.
 ```
 
 If a capability triggers a **standard** (non-express) supplier order, `run-check.ts` writes a
 `provider_orders` row and returns the check as `status: "partial"`. `apps/worker`'s
 `poll-orders.ts` job picks it up later, or the supplier's webhook arrives at
 `POST /internal/providers/:id/feedback` (`apps/api/src/routes/provider-feedback.ts`) and settles it
-immediately. Either way, the *same* `assemble.ts` and charge-matrix logic runs — which is exactly
-why that logic had to live in `packages/core` and not in `apps/api`.
+immediately. Either way, the *same* `assemble.ts` logic runs — which is exactly why that logic had
+to live in `packages/core` and not in `apps/api`.
 
 ---
 
@@ -209,27 +201,27 @@ test that pins it.
 
 ---
 
-## 7. Money: the charge matrix and the credit ledger
+## 7. Money: removed
 
-See [`packages/core/src/billing/pricing.ts`](../packages/core/src/billing/pricing.ts) for the full
-table with reasoning. The two rules that cost real money to honour, which is exactly why they're
-worth knowing:
+This service used to run a full multi-tenant charge matrix and append-only credit ledger
+(`credit_accounts`/`credit_ledger`, `packages/core/src/billing/pricing.ts`). That subsystem was
+removed: the service now runs **single-consumer** — one seeded tenant/API key
+(`npm run seed:service-tenant`) for a single trusted caller, not a self-serve product with
+customers to bill. Nothing is ever charged; `CheckReport.billing.credits_charged` is always `0`.
+The abuse/enumeration ladder and outbound completion webhooks (`tenant_restrictions`,
+`enumeration_buckets`, `webhook_endpoints`, `webhook_deliveries`) were removed in the same pass,
+for the same reason — they only ever existed to manage multiple tenants' accounts.
 
-- **Never charge for `unavailable`.** We didn't answer; charging for silence is fraud on the
-  tenant.
-- **Never charge for `inconclusive(unrecognised_provider_value)`.** That's *our* lexicon being
-  behind, not the tenant's usage — charging for it would make format drift profitable, which is
-  a direct incentive not to fix the thing that most endangers the product's honesty.
+What's still true and still worth knowing:
 
-The ledger (`credit_ledger` table) is **append-only**, enforced by a Postgres trigger that raises
-an exception on `UPDATE`/`DELETE` — not just a code convention. `credit_accounts.balance_credits`
-is a cache of the ledger sum, updated in the same transaction as every ledger insert, and asserted
-nightly by `apps/worker/src/jobs/reconcile.ts`. If you ever need to "fix" a balance, you write a
-new ledger row with a reason — you never `UPDATE` the balance directly.
-
-Reserve happens **before** the supplier is called (`provider_calls` row written pre-request, in
-`services.ts`'s router hooks) — a timeout arriving after a supplier already debited us is the
-common case, and recording only on success puts the books permanently behind reality.
+- `provider_calls` rows are still written **before** the supplier is called (in `services.ts`'s
+  router hooks) — a timeout arriving after a supplier already responded is the common case, and
+  this is our own spend visibility, not a customer's bill.
+- The global cross-tenant field cache (`packages/core/src/cache/store.ts`, section 9 below) is
+  untouched — it's what keeps supplier spend down, it just has no customer-facing price anymore.
+- `tenants`/`api_keys` still exist and are unrelated to this removal — see
+  `apps/api/src/auth/plugin.ts` for the Bearer-key check every route now goes through once
+  `DATABASE_URL` is set.
 
 ---
 
@@ -259,8 +251,8 @@ seconds, so a short key doesn't pseudonymise anything; it's the number with extr
 
 **The sentinel test** (`apps/api/test/sentinel.test.ts`) is the test that actually catches leaks in
 practice: it runs a fixed, fake-but-Luhn-valid IMEI through every code path — free tier, paid tier,
-every outcome arm, the cache, the ledger, the webhook payload — then greps everything the process
-produced (responses, logs, stored rows) for the raw digits. It found two real leaks during
+every outcome arm, the cache — then greps everything the process produced (responses, logs, stored
+rows) for the raw digits. It found two real leaks during
 development (a supplier error message reaching `detail`, and the IMEI landing in a query string on
 `GET /v1/capabilities`) — see the commit history for exactly what broke and how it was fixed. If
 you add a new code path that touches an IMEI, extend this test; don't just trust review.
@@ -294,11 +286,9 @@ can help sell a stolen phone and isn't.
 | Understand the wire format | `packages/contract/src/envelope.ts` (shapes) + `enums.ts` (closed vocabularies) |
 | Add a new provider/supplier | `.claude/skills/provider-adapter-authoring/SKILL.md`, then `packages/providers/src/dhru/` for a worked example |
 | Change what counts as pass/fail for a capability | `packages/core/src/report/assemble.ts` — and read the invariants file first |
-| Understand pricing/what gets charged | `packages/core/src/billing/pricing.ts` |
 | Understand cache TTLs | `packages/core/src/cache/ttl.ts` |
 | Add a database column/table | `db/migrations/` — plain SQL, dbmate, `-- migrate:up` / `-- migrate:down` markers |
-| Understand auth | `apps/api/src/auth/plugin.ts` + `keys.ts` |
-| Understand the abuse/enumeration guard | `apps/api/src/abuse/enumeration.ts` — read the docstring, it explains the bucket scheme |
+| Understand auth | `apps/api/src/auth/plugin.ts` + `keys.ts` — one seeded tenant/API key, single-consumer mode |
 | Run everything locally | root `README.md` "Quick start" |
 | Understand *why* a decision was made | `docs/adr/000N-*.md` — check here before assuming something is arbitrary |
 
@@ -307,20 +297,22 @@ can help sell a stolen phone and isn't.
 ## 11. Non-obvious things that will trip you up
 
 - **The paid routes don't exist unless `DATABASE_URL` is set.** `apps/api/src/app.ts` only
-  registers `checkRoutes`/`accountRoutes`/`providerFeedbackRoutes` when a `services` object is
-  passed in. Running without a database is a *supported* mode (the free tier), not a broken one —
-  but the failure mode is a plain 404 on every paid route (`GET /v1/balance` included), which reads
-  exactly like a routing bug until you remember this. `npm run dev` and `npm run start` load `.env`
-  from the repo root automatically (`node --env-file-if-exists=.env`, wired into
-  `apps/api/package.json` and `apps/worker/package.json`) — copy `.env.example` once and this stops
-  being something you have to remember per shell session. **This does not run in Docker**: the
-  image's `CMD` invokes `node apps/api/dist/server.js` directly, bypassing `npm run start` and its
-  flag entirely, so compose's `environment:` block is still how the container gets its config.
-- **`GET /metrics` is one of those paid routes**, even though it needs no API key. It's registered
-  inside `accountRoutes` alongside the routes that genuinely require a tenant, so it inherits their
-  "only exists with `DATABASE_URL`" gate for no reason connected to its own purpose. A Prometheus
-  scraper monitoring process health in free-tier mode currently gets a 404. Known, not yet fixed —
-  see the note in `bruno/collection.bru` and the README's Bruno table.
+  registers `checkRoutes`/`providerFeedbackRoutes`/`/metrics` when a `services` object is passed
+  in. Running without a database is a *supported* mode (the free tier), not a broken one — but the
+  failure mode is a plain 404 on every paid route, which reads exactly like a routing bug until you
+  remember this. `npm run dev` and `npm run start` load `.env` from the repo root automatically
+  (`node --env-file-if-exists=.env`, wired into `apps/api/package.json` and
+  `apps/worker/package.json`) — copy `.env.example` once and this stops being something you have to
+  remember per shell session. **This does not run in Docker**: the image's `CMD` invokes
+  `node apps/api/dist/server.js` directly, bypassing `npm run start` and its flag entirely, so
+  compose's `environment:` block is still how the container gets its config.
+- **With `DATABASE_URL` set, EVERY route requires the API key, including the free ones.**
+  `/v1/imei/validate` and `/v1/tac/:tac` are gated behind `requireTenant` in that mode too (see
+  `app.ts`) — this service has exactly one caller and nothing on it is public once a database is
+  configured. Without a database, those same routes stay open (no key store to check against).
+- **`GET /metrics` needs no API key** even when `DATABASE_URL` is set, but it still only exists in
+  that mode (registered directly in `app.ts`, not behind `requireTenant`) — a Prometheus scraper
+  monitoring process health in free-tier mode gets a 404.
 - **`apps/worker` refuses to start without `DATABASE_URL`** — there's nothing for it to do in the
   free tier, so it exits rather than idling.
 - **A provider with no credentials configured is simply not built** — not built-and-failing. See
@@ -344,8 +336,8 @@ can help sell a stolen phone and isn't.
 
 - Unit tests run with **no external services** — Postgres is swapped for
   `packages/core/src/db/memory.ts`, an in-memory implementation of the exact same repository
-  interfaces the Postgres implementation satisfies. This is why the money/ledger logic
-  (concurrent reserves, idempotent retries) can be tested exhaustively and fast.
+  interfaces the Postgres implementation satisfies. This is why idempotent-retry logic can be
+  tested exhaustively and fast.
 - Provider HTTP behaviour is tested against `undici`'s `MockAgent`
   (`packages/providers/test/transport.test.ts`) — real fetch calls, mocked network, so headers,
   status-code handling and timeouts are actually exercised.

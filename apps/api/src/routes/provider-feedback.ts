@@ -3,7 +3,6 @@ import { ErrorResponse } from '@imei-check/contract';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { assembleSection } from '@imei-check/core';
 import { coverageFor } from '@imei-check/core';
-import { chargeFor } from '@imei-check/core';
 import type { AppServices } from '../services.js';
 import '../lib/raw-body.js';
 
@@ -105,24 +104,7 @@ export function providerFeedbackRoutes(services: AppServices): FastifyPluginAsyn
           settledAt: now,
         });
 
-        // An async order was charged when it was placed. If it came back as something we do not
-        // charge for, refund it now -- the charge matrix does not stop applying because the
-        // answer arrived late.
         const check = await services.repos.checks.byId(order.tenantId, order.checkId);
-        const listCredits = serviceCredits(services, order.providerId, order.serviceId);
-        const decision = chargeFor({ section, listCredits, cached: false });
-        if (decision.credits < listCredits && check !== undefined) {
-          await services.repos.credits.refund({
-            tenantId: order.tenantId,
-            credits: listCredits - decision.credits,
-            checkId: order.checkId,
-            reason:
-              decision.reason === 'not_charged_our_lexicon_gap'
-                ? 'absorbed_provider_bug'
-                : 'settle_refund',
-            idempotencyKey: `async-settle:${order.id}`,
-          });
-        }
 
         const open = await services.repos.orders.openForCheck(order.checkId);
         if (open.length === 0 && check !== undefined) {
@@ -136,9 +118,4 @@ export function providerFeedbackRoutes(services: AppServices): FastifyPluginAsyn
       },
     );
   };
-}
-
-function serviceCredits(services: AppServices, providerId: string, serviceId: string): number {
-  const provider = services.providers.find((p) => p.id === providerId);
-  return provider?.catalogue().find((s) => s.serviceId === serviceId)?.credits ?? 0;
 }

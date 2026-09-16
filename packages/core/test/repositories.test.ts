@@ -154,27 +154,6 @@ describe('idempotency records', () => {
   });
 });
 
-describe('webhook repository', () => {
-  it('lists only active endpoints subscribed to the event', async () => {
-    const r = await repos();
-    await r.webhooks.register({
-      id: 'e1', tenantId: 't1', url: 'https://a', secret: 's',
-      events: ['check.completed'], active: true,
-    });
-    await r.webhooks.register({
-      id: 'e2', tenantId: 't1', url: 'https://b', secret: 's',
-      events: ['check.completed'], active: false,
-    });
-    await r.webhooks.register({
-      id: 'e3', tenantId: 't1', url: 'https://c', secret: 's', events: ['other'], active: true,
-    });
-
-    const found = await r.webhooks.endpointsFor('t1', 'check.completed');
-    expect(found.map((e) => e.id)).toEqual(['e1']);
-    expect((await r.webhooks.endpointById('e2'))?.active).toBe(false);
-  });
-});
-
 describe('coverage metadata', () => {
   const directory = InMemoryTacDirectory.from(
     [['35310411', { manufacturer: 'Apple', model: 'iPhone 13', source: 'osmocom' }]],

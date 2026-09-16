@@ -13,11 +13,10 @@ import { healthRoutes, type DatabaseProbe } from './routes/health.js';
 import { imeiRoutes } from './routes/imei.js';
 import { tacRoutes } from './routes/tac.js';
 import { checkRoutes } from './routes/checks.js';
-import { accountRoutes } from './routes/account.js';
 import { providerFeedbackRoutes } from './routes/provider-feedback.js';
 import { authPlugin } from './auth/plugin.js';
 import { registerRawBody } from './lib/raw-body.js';
-import type { AppServices } from './services.js';
+import { refreshCircuitGauge, type AppServices } from './services.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -66,7 +65,6 @@ export async function buildApp(deps: AppDeps) {
       tags: [
         { name: 'free', description: 'No credits, no upstream providers.' },
         { name: 'paid', description: 'Costs credits. Requires an API key.' },
-        { name: 'account', description: 'Balance, ledger and webhooks.' },
         { name: 'meta', description: 'Health, schema and attributions.' },
       ],
     },
@@ -91,8 +89,6 @@ export async function buildApp(deps: AppDeps) {
   });
 
   await app.register(healthRoutes(deps.databaseProbe));
-  await app.register(imeiRoutes);
-  await app.register(tacRoutes);
 
   if (deps.services !== undefined) {
     const services = deps.services;
@@ -111,9 +107,28 @@ export async function buildApp(deps: AppDeps) {
       },
       onUsed: (id, at) => services.repos.apiKeys.touch(id, at),
     });
+    // Lookup is free of charge, but not free of auth: with a database configured, this service
+    // has exactly one caller and nothing on it should be reachable without their key.
+    await app.register(async (instance) => {
+      instance.addHook('preHandler', instance.requireTenant);
+      await instance.register(imeiRoutes);
+      await instance.register(tacRoutes);
+    });
     await app.register(checkRoutes(services));
-    await app.register(accountRoutes(services));
     await app.register(providerFeedbackRoutes(services));
+    app.get(
+      '/metrics',
+      { schema: { summary: 'Prometheus metrics.', tags: ['meta'], hide: true } },
+      async (_request, reply) => {
+        refreshCircuitGauge(services);
+        return reply.header('content-type', 'text/plain; version=0.0.4').send(await services.metrics.render());
+      },
+    );
+  } else {
+    // No database means no key store to check a caller against -- the free offline tier stays
+    // open, as documented (CLAUDE.md, milestone M0).
+    await app.register(imeiRoutes);
+    await app.register(tacRoutes);
   }
 
   return app;

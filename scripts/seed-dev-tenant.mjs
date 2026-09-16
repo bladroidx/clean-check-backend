@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Seeds one development tenant, a topped-up credit balance, and a fresh API key.
+ * Seeds one development tenant and a fresh API key. Billing was removed entirely -- there is no
+ * credit balance to top up here.
  *
- * The paid routes (`POST /v1/checks`, `GET /v1/balance`, ...) only exist when the server is
- * started with `DATABASE_URL` set (see `apps/api/src/app.ts`) -- there is no tenant to authenticate
- * against otherwise. This script is the fast path from "empty database" to "a key I can paste into
- * Bruno or curl", for local development only.
+ * The paid routes (`POST /v1/checks`, ...) only exist when the server is started with
+ * `DATABASE_URL` set (see `apps/api/src/app.ts`) -- there is no tenant to authenticate against
+ * otherwise. This script is the fast path from "empty database" to "a key I can paste into Bruno
+ * or curl", for local development only.
  *
  * Never run this against a production database: it is idempotent for a single fixed tenant id, not
  * a general-purpose provisioning tool, and it prints the plaintext key to stdout.
@@ -21,7 +22,6 @@ if (DATABASE_URL === undefined) {
 }
 
 const TENANT_ID = process.env.SEED_TENANT_ID ?? 'ten_dev';
-const TOPUP_CREDITS = Number(process.env.SEED_CREDITS ?? 1000);
 
 const repos = new PgRepositories(createPool(DATABASE_URL));
 
@@ -35,10 +35,9 @@ try {
       status: 'active',
       imeiSalt: generateTenantSalt(),
     });
-    await repos.credits.topUp(TENANT_ID, TOPUP_CREDITS, `dev-seed-${Date.now()}`);
-    console.log(`Created tenant '${TENANT_ID}' with ${TOPUP_CREDITS} credits.`);
+    console.log(`Created tenant '${TENANT_ID}'.`);
   } else {
-    console.log(`Tenant '${TENANT_ID}' already exists. Balance: ${await repos.credits.balance(TENANT_ID)} credits.`);
+    console.log(`Tenant '${TENANT_ID}' already exists.`);
   }
 
   const key = generateApiKey(/* live */ false);
@@ -57,9 +56,9 @@ try {
   console.log(`  ${key.plaintext}`);
   console.log('');
   console.log('Use it as:');
-  console.log(`  curl -H "authorization: Bearer ${key.plaintext}" http://localhost:3000/v1/balance`);
+  console.log(`  curl -H "authorization: Bearer ${key.plaintext}" http://localhost:3000/v1/checks ...`);
   console.log('');
-  console.log('Or for the Bruno "Paid"/"Account" folders:');
+  console.log('Or for the Bruno "Paid" folder:');
   console.log(`  BRUNO_API_KEY=${key.plaintext} npm run api:test:paid`);
 } finally {
   await repos.close();

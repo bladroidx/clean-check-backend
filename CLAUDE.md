@@ -58,19 +58,26 @@ open circuit only. If provider A says "blacklisted", do not shop for one who say
 
 ## Money
 
-- Never charge for `unavailable`, nor for `inconclusive(unrecognised_provider_value)` — that one is
-  our bug, not their usage.
+**Billing was removed.** This service runs single-consumer — one seeded tenant/API key
+(`npm run seed:service-tenant`) for a single trusted caller (check-this-phone's backend), not a
+multi-tenant self-serve product. There is no `credit_ledger`, no `credit_accounts`, no charge
+matrix, no `/v1/balance`: nothing is ever charged, and `CheckReport.billing.credits_charged` is
+always `0` on the wire. `tenants`/`api_keys` still exist for auth (single seeded row); everything
+that only ever served billing, the abuse ladder or outbound completion webhooks does not.
+
+What still matters even with no billing:
+
 - Write the `provider_calls` row **before** the HTTP call. A timeout arriving after the provider
-  already debited us is the common case.
-- `credit_ledger` is the truth; `credit_accounts.balance` is a cache maintained in the same
-  transaction and asserted nightly.
-- Cached hits cost 20% of list. The global cross-tenant cache is the margin.
+  already responded is the common case, and this is our own spend visibility — not a customer's
+  bill, but still real money leaving the business.
+- The global cross-tenant field cache (`packages/core/src/cache/store.ts`) is untouched and still
+  the thing that keeps supplier spend down; it just no longer has a customer-facing price.
 
 ## Layout
 
 `packages/contract` (zod → types → OpenAPI, zero deps) ← `packages/identity` (pure, no I/O) ←
-`packages/providers` (suppliers, lexicon, router) ← `packages/core` (repositories, cache, charge
-matrix, `assemble.ts`) ← `apps/api`, `apps/worker`.
+`packages/providers` (suppliers, lexicon, router) ← `packages/core` (repositories, cache,
+`assemble.ts`) ← `apps/api`, `apps/worker`.
 
 **Nothing depends on `apps/` — including the other app.** Shared domain code goes in
 `packages/core`; see ADR-0006. Enforced by dependency-cruiser in CI — the analogue of the app's
@@ -86,4 +93,5 @@ construct a `detail` that never passed through the transport's scrubber.
 before any merge that touches logging, persistence or a provider.
 
 The paid routes exist only when `DATABASE_URL` is set. Without it the service runs the free
-offline tier — a supported mode, not a degraded one.
+offline tier — a supported mode, not a degraded one. Once `DATABASE_URL` is set, every route,
+including the free ones, requires the single seeded API key: there is exactly one caller.

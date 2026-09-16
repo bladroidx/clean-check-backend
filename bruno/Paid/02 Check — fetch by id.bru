@@ -41,8 +41,8 @@ docs {
   `lastCheckId` that this request reads.
 
   This is how a caller picks up a check that went `status: "partial"` because a standard
-  (non-express) supplier order is still outstanding: poll this endpoint, or register a webhook
-  (see **Account → Register a webhook**) and wait to be told.
+  (non-express) supplier order is still outstanding: poll this endpoint until `status` reads
+  `"complete"`.
 
   A check id that exists but belongs to a different tenant returns 404, not 403 — the same
   reasoning as the auth 401: telling an attacker "that id exists but isn't yours" is a

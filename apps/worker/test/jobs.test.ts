@@ -1,10 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { MemoryRepositories, Metrics, generateTenantSalt, type Repositories } from '@imei-check/core';
 import { InMemoryTacDirectory } from '@imei-check/identity';
 import type { CatalogueService, Provider, ProviderOutcome } from '@imei-check/providers';
 import { backoffFor, pollOrders } from '../src/jobs/poll-orders.js';
-import { deliverWebhooks, signPayload } from '../src/jobs/deliver-webhooks.js';
-import { reconcile } from '../src/jobs/reconcile.js';
 import { ChecksumMismatch, ingestTacCsv, observationFrom, parseTacCsv } from '../src/jobs/tac-ingest.js';
 
 const directory = InMemoryTacDirectory.from(
@@ -51,8 +49,6 @@ async function seeded(overrides: Partial<Parameters<Repositories['orders']['inse
   await repos.tenants.create({
     id: 't1', name: 'T', plan: 'std', status: 'active', imeiSalt: generateTenantSalt(),
   });
-  await repos.credits.topUp('t1', 100);
-  await repos.credits.reserve({ tenantId: 't1', credits: 8, checkId: 'chk_1', idempotencyKey: 'r1' });
   await repos.checks.insert({
     id: 'chk_1',
     tenantId: 't1',
@@ -63,7 +59,7 @@ async function seeded(overrides: Partial<Parameters<Repositories['orders']['inse
     requestedCapabilities: ['blacklist.gsma'],
     status: 'partial',
     idempotencyKey: undefined,
-    creditsCharged: 8,
+    creditsCharged: 0,
     verdict: undefined,
     createdAt: new Date('2026-09-13T00:00:00Z'),
     completedAt: undefined,
@@ -137,12 +133,10 @@ describe('polling standard orders', () => {
     expect((await repos.orders.byReference('ref_1'))?.status).toBe('pending');
   });
 
-  /** A check that never got an answer must not stay charged. */
-  it('abandons an expired order AND refunds it', async () => {
+  it('abandons an expired order and marks the section unavailable', async () => {
     const repos = await seeded({ expiresAt: new Date('2026-09-13T00:30:00Z') });
     const provider = new PollableProvider({ kind: 'pending', orderReference: 'supplier_1' });
 
-    const before = await repos.credits.balance('t1');
     const summary = await pollOrders({
       repos, providers: [provider], tacDirectory: directory, metrics: new Metrics(false), now,
     });
@@ -151,125 +145,12 @@ describe('polling standard orders', () => {
     expect(provider.polls).toBe(0);
     const sections = await repos.checks.sections('chk_1');
     expect(sections[0]?.outcome).toBe('unavailable');
-    expect(await repos.credits.balance('t1')).toBe(before + 8);
-  });
-
-  it('refunds when a late answer turns out to be one we do not charge for', async () => {
-    const repos = await seeded();
-    const provider = new PollableProvider({
-      kind: 'answered',
-      fields: [],
-      misses: [{ field: 'blacklist.status', rawValue: 'Who knows', serviceId: 'gsx' }],
-    });
-
-    const before = await repos.credits.balance('t1');
-    await pollOrders({
-      repos, providers: [provider], tacDirectory: directory, metrics: new Metrics(false), now,
-    });
-
-    // The charge matrix does not stop applying because the answer arrived late.
-    expect(await repos.credits.balance('t1')).toBe(before + 8);
   });
 
   it('backs off exponentially with a cap', () => {
     expect(backoffFor(1)).toBe(5 * 60 * 1000);
     expect(backoffFor(2)).toBe(10 * 60 * 1000);
     expect(backoffFor(20)).toBe(60 * 60 * 1000);
-  });
-});
-
-describe('webhook delivery', () => {
-  async function queued() {
-    const repos = new MemoryRepositories();
-    await repos.tenants.create({
-      id: 't1', name: 'T', plan: 'std', status: 'active', imeiSalt: generateTenantSalt(),
-    });
-    await repos.webhooks.register({
-      id: 'whe_1',
-      tenantId: 't1',
-      url: 'https://hooks.example.com/imei',
-      secret: 'secret',
-      events: ['check.completed'],
-      active: true,
-    });
-    await repos.webhooks.enqueue({
-      id: 'whd_1',
-      endpointId: 'whe_1',
-      checkId: 'chk_1',
-      event: 'check.completed',
-      payload: { check_id: 'chk_1' },
-      status: 'pending',
-      attempts: 0,
-      nextRetryAt: undefined,
-      lastStatus: undefined,
-    });
-    return repos;
-  }
-
-  it('signs the exact bytes sent, with the timestamp inside the signature', async () => {
-    const repos = await queued();
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(url), init: init ?? {} });
-      return new Response('', { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const summary = await deliverWebhooks({ repos, fetchImpl });
-
-    expect(summary.delivered).toBe(1);
-    const headers = calls[0]?.init.headers as Record<string, string>;
-    const body = calls[0]?.init.body as string;
-    const timestamp = headers['x-imei-check-timestamp'];
-    expect(headers['x-imei-check-signature']).toBe(signPayload('secret', Number(timestamp), body));
-  });
-
-  it('retries with backoff on a 500 and gives up eventually', async () => {
-    const repos = await queued();
-    const fetchImpl = (async () => new Response('', { status: 500 })) as unknown as typeof fetch;
-
-    const summary = await deliverWebhooks({ repos, fetchImpl });
-    expect(summary.retrying).toBe(1);
-  });
-
-  it('a signature over a different body does not verify', () => {
-    expect(signPayload('s', 1, 'a')).not.toBe(signPayload('s', 1, 'b'));
-    // The timestamp is inside the signed material, so a captured delivery cannot be replayed
-    // forever against a receiver that checks it.
-    expect(signPayload('s', 1, 'a')).not.toBe(signPayload('s', 2, 'a'));
-  });
-});
-
-describe('reconciliation', () => {
-  it('reports zero drift on a healthy ledger', async () => {
-    const repos = new MemoryRepositories();
-    await repos.tenants.create({
-      id: 't1', name: 'T', plan: 'std', status: 'active', imeiSalt: generateTenantSalt(),
-    });
-    await repos.credits.topUp('t1', 50);
-
-    const report = await reconcile({
-      repos, providers: [], metrics: new Metrics(false), tenantIds: ['t1'],
-    });
-    expect(report.drifts[0]?.drift).toBe(0);
-  });
-
-  it('purges expired cache rows', async () => {
-    const repos = new MemoryRepositories();
-    await repos.cache.put({
-      cacheKey: 'k',
-      capability: 'blacklist.gsma',
-      field: 'blacklist.status',
-      value: 'clean',
-      rawLabel: undefined,
-      coverage: { registries: [], caveats: [] },
-      providerId: 'a',
-      checkedAt: new Date('2020-01-01'),
-      expiresAt: new Date('2020-01-02'),
-    });
-    const report = await reconcile({
-      repos, providers: [], metrics: new Metrics(false), tenantIds: [],
-    });
-    expect(report.cachePurged).toBe(1);
   });
 });
 

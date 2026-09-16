@@ -17,21 +17,29 @@ docs {
 
   ## Folders
 
-  **Health**, **Free tier**, **Meta** and **Internal** need nothing but `npm run dev`.
+  **Health** and **Internal** need nothing but `npm run dev`, against a server started with or
+  without `DATABASE_URL`.
 
-  **Paid** and **Account** need a server started with `DATABASE_URL`, plus an `apiKey` set in the
-  Local environment (it is declared as a secret var, so it is never written to the file) — run
-  `npm run seed:dev` to get one. Without a database, `POST /v1/checks` and `GET /v1/balance` are
-  not degraded, they are 404: the routes are only registered when `services` exist (see
-  `apps/api/src/app.ts`). That 404 means "start the server with DATABASE_URL", not "something is
-  broken".
+  **Against a server started WITHOUT `DATABASE_URL`** (the free offline tier), **Free tier** and
+  **Meta** also need nothing — no key, no database. **Paid needs a database and 404s without one**:
+  the routes are only registered when `services` exist (see `apps/api/src/app.ts`). That 404 means
+  "start the server with DATABASE_URL", not "something is broken".
 
-  With DATABASE_URL set but no provider credentials configured, the paid sections still pass every
-  assertion — they come back `unavailable(provider_not_configured)` at zero cost. That is the
-  point: the contract does not depend on a supplier being up.
+  **Against a server started WITH `DATABASE_URL`** — single-consumer mode — every route requires
+  an `apiKey`, including **Free tier** and **Meta**: this service now runs as one seeded
+  tenant/API key for a single caller, not a public free tier alongside a paid one. Set `apiKey` in
+  the Local environment (it is declared as a secret var, so it is never written to the file) — run
+  `npm run seed:dev` to get one.
 
-  Every request tagged `paid` in this collection needs both. `npm run api:test` runs everything
-  else; `npm run api:test:paid` (with `BRUNO_API_KEY` set) runs the tagged ones.
+  With `DATABASE_URL` set but no provider credentials configured, the **Paid** sections still pass
+  every assertion — they come back `unavailable(provider_not_configured)` at zero cost. That is
+  the point: the contract does not depend on a supplier being up. Nothing in **Paid** is ever
+  charged either way — billing was removed entirely.
+
+  Every request tagged `paid` needs `apiKey` unconditionally. `npm run api:test` runs everything
+  else; `npm run api:test:paid` (with `BRUNO_API_KEY` set) runs the tagged ones. If your local
+  server has `DATABASE_URL` set, export `BRUNO_API_KEY` before running `npm run api:test` too —
+  otherwise the now-gated **Free tier**/**Meta** requests 401.
 
   Test IMEIs live in the **Local** environment as variables, so no request file contains a
   15-digit number. That is deliberate: `apps/api/test/sentinel.test.ts` greps the whole repo for

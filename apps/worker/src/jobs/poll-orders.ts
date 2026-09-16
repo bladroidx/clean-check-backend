@@ -1,6 +1,5 @@
 import {
   assembleSection,
-  chargeFor,
   coverageFor,
   type Metrics,
   type OrderRow,
@@ -21,9 +20,8 @@ import type { Provider } from '@imei-check/providers';
  *
  * - **Backoff is exponential and capped.** A supplier that is slow is not a supplier to ask
  *   sixty times an hour; most charge for `getimeiorder` on some plans.
- * - **An expired order is abandoned and REFUNDED**, not polled forever. A check that never got an
- *   answer must not stay charged, and `awaiting_provider_timed_out` is an `unavailable` reason
- *   precisely so that outcome is expressible.
+ * - **An expired order is abandoned**, not polled forever, and its section is marked `unavailable`
+ *   with reason `awaiting_provider_timed_out` so that outcome is honestly expressible.
  */
 
 const BASE_BACKOFF_MS = 5 * 60 * 1000;
@@ -120,19 +118,6 @@ export async function pollOrders(deps: PollDeps): Promise<PollSummary> {
       settledAt: at,
     });
 
-    // The charge matrix still applies when the answer arrives late.
-    const listCredits = creditsFor(deps.providers, order);
-    const decision = chargeFor({ section, listCredits, cached: false });
-    if (decision.credits < listCredits) {
-      await deps.repos.credits.refund({
-        tenantId: order.tenantId,
-        credits: listCredits - decision.credits,
-        checkId: order.checkId,
-        reason: decision.reason === 'not_charged_our_lexicon_gap' ? 'absorbed_provider_bug' : 'settle_refund',
-        idempotencyKey: `poll-settle:${order.id}`,
-      });
-    }
-
     await completeIfDone(deps, order, at);
     answered += 1;
   }
@@ -141,10 +126,10 @@ export async function pollOrders(deps: PollDeps): Promise<PollSummary> {
 }
 
 /**
- * Gives up, refunds, and says so in the report.
+ * Gives up and says so in the report.
  *
- * The refund is the point. We charged when the order was placed; if no answer ever arrived, the
- * tenant is owed that back, and `unavailable` costs nothing by the charge matrix.
+ * The order timed out: the supplier never answered. `unavailable(awaiting_provider_timed_out)` is
+ * the honest outcome -- we never obtained an answer, so nothing is claimed.
  */
 async function abandon(deps: PollDeps, order: OrderRow, at: Date): Promise<void> {
   const section = assembleSection({
@@ -161,19 +146,12 @@ async function abandon(deps: PollDeps, order: OrderRow, at: Date): Promise<void>
     section,
   });
   await deps.repos.orders.update(order.id, { status: 'abandoned', settledAt: at });
-  await deps.repos.credits.refund({
-    tenantId: order.tenantId,
-    credits: creditsFor(deps.providers, order),
-    checkId: order.checkId,
-    reason: 'settle_refund',
-    idempotencyKey: `abandon:${order.id}`,
-  });
   deps.metrics.sectionOutcome.inc({
     capability: order.capability,
     outcome: 'unavailable',
     reason: 'awaiting_provider_timed_out',
   });
-  deps.log?.({ order_id: order.id, check_id: order.checkId }, 'order abandoned and refunded');
+  deps.log?.({ order_id: order.id, check_id: order.checkId }, 'order abandoned');
   await completeIfDone(deps, order, at);
 }
 
@@ -182,11 +160,6 @@ async function completeIfDone(deps: PollDeps, order: OrderRow, at: Date): Promis
   if (open.length === 0) {
     await deps.repos.checks.update(order.checkId, { status: 'complete', completedAt: at });
   }
-}
-
-function creditsFor(providers: readonly Provider[], order: OrderRow): number {
-  const provider = providers.find((p) => p.id === order.providerId);
-  return provider?.catalogue().find((s) => s.serviceId === order.serviceId)?.credits ?? 0;
 }
 
 export function backoffFor(attempts: number): number {

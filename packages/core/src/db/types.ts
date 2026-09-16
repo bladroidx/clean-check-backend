@@ -45,54 +45,6 @@ export interface ApiKeyRepo {
   insert(record: ApiKeyRecord & { keySha256: string }): Promise<void>;
 }
 
-export type LedgerReason =
-  | 'topup'
-  | 'reserve'
-  | 'settle_refund'
-  | 'absorbed_provider_bug'
-  | 'manual_adjustment';
-
-export interface LedgerEntry {
-  readonly id: number;
-  readonly tenantId: string;
-  readonly delta: number;
-  readonly reason: LedgerReason;
-  readonly checkId: string | undefined;
-  readonly balanceAfter: number;
-  readonly idempotencyKey: string | undefined;
-  readonly createdAt: Date;
-}
-
-export type ReserveResult =
-  | { readonly ok: true; readonly reserved: number; readonly balanceAfter: number }
-  | { readonly ok: false; readonly shortfall: number; readonly balance: number };
-
-export interface CreditRepo {
-  balance(tenantId: string): Promise<number>;
-  topUp(tenantId: string, credits: number, idempotencyKey?: string): Promise<number>;
-  /**
-   * Debits up front. `idempotencyKey` is what makes a retried reserve a no-op rather than a second
-   * charge -- enforced by a UNIQUE constraint, not by a read-then-write.
-   */
-  reserve(args: {
-    tenantId: string;
-    credits: number;
-    checkId: string;
-    idempotencyKey: string;
-  }): Promise<ReserveResult>;
-  /** Refunds reserved-minus-actual as a NEW positive row. The ledger is append-only. */
-  refund(args: {
-    tenantId: string;
-    credits: number;
-    checkId: string;
-    reason: LedgerReason;
-    idempotencyKey: string;
-  }): Promise<number>;
-  ledger(tenantId: string, limit: number): Promise<readonly LedgerEntry[]>;
-  /** Nightly assertion: the cached balance must equal the sum of the ledger. */
-  reconcile(tenantId: string): Promise<{ cached: number; summed: number; drift: number }>;
-}
-
 export interface CheckRecord {
   readonly id: string;
   readonly tenantId: string;
@@ -217,60 +169,13 @@ export interface IdempotencyRepo {
   ): Promise<void>;
 }
 
-export type RestrictionLevel = 'none' | 'throttled' | 'cache_only' | 'no_paid' | 'suspended';
-
-export interface AbuseRepo {
-  /** One bucket = (tac, first 3 serial digits). 1000 per TAC; no IMEI is stored. */
-  record(tenantId: string, tac: string, bucket: number, windowStart: Date): Promise<void>;
-  distinctBuckets(tenantId: string, tac: string, since: Date): Promise<number>;
-  restriction(tenantId: string): Promise<{ level: RestrictionLevel; reason: string | undefined }>;
-  restrict(tenantId: string, level: RestrictionLevel, reason: string, expiresAt?: Date): Promise<void>;
-}
-
-export interface WebhookEndpoint {
-  readonly id: string;
-  readonly tenantId: string;
-  readonly url: string;
-  readonly secret: string;
-  readonly events: readonly string[];
-  readonly active: boolean;
-}
-
-export interface WebhookDelivery {
-  readonly id: string;
-  readonly endpointId: string;
-  readonly checkId: string;
-  readonly event: string;
-  readonly payload: unknown;
-  readonly status: 'pending' | 'delivered' | 'failed';
-  readonly attempts: number;
-  readonly nextRetryAt: Date | undefined;
-  readonly lastStatus: number | undefined;
-}
-
-export interface WebhookRepo {
-  endpointsFor(tenantId: string, event: string): Promise<readonly WebhookEndpoint[]>;
-  /**
-   * By id, because a queued delivery knows its endpoint but not its tenant. Reconstructing the
-   * tenant to search by it was a detour that silently found nothing.
-   */
-  endpointById(id: string): Promise<WebhookEndpoint | undefined>;
-  register(endpoint: WebhookEndpoint): Promise<void>;
-  enqueue(delivery: WebhookDelivery): Promise<void>;
-  due(now: Date, limit: number): Promise<readonly WebhookDelivery[]>;
-  markDelivery(id: string, patch: Partial<WebhookDelivery>): Promise<void>;
-}
-
 export interface Repositories {
   readonly tenants: TenantRepo;
   readonly apiKeys: ApiKeyRepo;
-  readonly credits: CreditRepo;
   readonly checks: CheckRepo;
   readonly providerCalls: ProviderCallRepo;
   readonly cache: CacheRepo;
   readonly orders: OrderRepo;
   readonly idempotency: IdempotencyRepo;
-  readonly abuse: AbuseRepo;
-  readonly webhooks: WebhookRepo;
   close(): Promise<void>;
 }

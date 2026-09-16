@@ -19,30 +19,24 @@ import {
 } from '@imei-check/providers';
 import type { FieldCache } from '@imei-check/core';
 import type { Metrics } from '@imei-check/core';
-import type { CreditRepo, Repositories, RestrictionLevel } from '@imei-check/core';
+import type { Repositories } from '@imei-check/core';
 import { assembleSection, deriveWarrantyStatus } from '@imei-check/core';
 import { coverageFor } from '@imei-check/core';
-import { chargeFor } from '@imei-check/core';
 import { identityCoverage } from '@imei-check/core';
 
 /**
  * One check, end to end.
  *
- * The ordering here is load-bearing and each step is placed where it is for a reason that costs
- * money or credibility if moved:
+ * The ordering here is load-bearing:
  *
  * 1. **Free capabilities first.** `identity.model` is answered from the in-process TAC directory.
  *    Buying it from a supplier when we already know the answer is pure waste.
- * 2. **Cache before credits.** A cached capability costs 20% of list, so the reserve has to know
- *    what is cached before it decides how much to hold.
- * 3. **Reserve before providers.** A check that dies halfway must not leave the tenant unbilled
- *    for calls we have already paid for.
- * 4. **Settle after.** We refund the difference between reserved and actually chargeable, because
- *    the charge matrix cannot be evaluated until the arms are known.
+ * 2. **Cache before providers.** A cached capability is served straight from the field cache, so
+ *    checking it first saves the supplier call regardless of billing.
  *
- * Partial affordability is honoured rather than rejected: a tenant who can afford two of three
- * capabilities gets two answers and `unavailable(insufficient_credits)` for the third. A 402 that
- * kills the whole check throws away answers we could have given and already paid nothing for.
+ * There is no reserve/settle step: billing is permanently off in single-consumer mode. Every
+ * requested capability simply runs -- no affordability gating, no abuse-ladder gating. The report
+ * honestly states `credits_charged: 0` because nothing was ever charged.
  */
 
 export interface RunCheckDeps {
@@ -63,7 +57,6 @@ export interface RunCheckRequest {
   readonly capabilities: readonly Capability[];
   readonly maxAgeSeconds: number | undefined;
   readonly idempotencyKey: string | undefined;
-  readonly restriction: RestrictionLevel;
   readonly signal: AbortSignal;
 }
 
@@ -142,49 +135,9 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
     deps.metrics.cacheHit.inc({ capability, result: complete ? 'hit' : 'miss' });
   }
 
-  // ---- 3. Price and reserve.
-  const quote = paid.map((capability) => {
-    const isCached = cached.has(capability);
-    const list = listPriceFor(deps, capability, tac);
-    const decision = chargeFor({
-      section: { outcome: 'pass', reason: undefined },
-      listCredits: list,
-      cached: isCached,
-    });
-    return { capability, credits: decision.credits, cached: isCached, list };
-  });
-
-  const affordable = await reserveWhatWeCan({
-    credits: deps.repos.credits,
-    tenantId: request.tenantId,
-    checkId,
-    quote,
-    idempotencyKey: request.idempotencyKey ?? checkId,
-    // `no_paid` and `cache_only` stop spend without stopping the service. That is what makes a
-    // false positive on the abuse ladder cheap for everyone.
-    allowPaid: request.restriction !== 'no_paid' && request.restriction !== 'suspended',
-    allowUncached: request.restriction !== 'cache_only',
-  });
-
-  let reserved = affordable.reservedCredits;
-
-  // ---- 4. Resolve each paid capability.
-  for (const item of quote) {
-    const { capability } = item;
-
-    if (!affordable.granted.has(capability)) {
-      const section = unavailable({
-        capability,
-        checkedAt: startedAt,
-        coverage: coverageFor(capability, deps.tacDirectory),
-        reason: affordable.reasonFor(capability),
-        detail: affordable.detailFor(capability),
-      });
-      sections.set(capability, section);
-      deps.metrics.sectionOutcome.inc({ capability, outcome: 'unavailable', reason: section.reason ?? 'none' });
-      continue;
-    }
-
+  // ---- 3. Resolve each paid capability. No affordability gating: billing is permanently off, so
+  // every requested capability simply runs.
+  for (const capability of paid) {
     const hits = cached.get(capability);
     if (hits !== undefined && hits.length > 0) {
       const section = fromCache(capability, hits, deps, startedAt);
@@ -192,13 +145,12 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
       for (const hit of hits) {
         resolvedFields.set(hit.field, { field: hit.field, value: hit.value, ...(hit.rawLabel !== undefined ? { rawLabel: hit.rawLabel } : {}) });
       }
-      breakdown.push({ capability, credits: item.credits, cached: true });
+      breakdown.push({ capability, credits: 0, cached: true });
       deps.metrics.sectionOutcome.inc({
         capability,
         outcome: section.outcome,
         reason: section.reason ?? 'none',
       });
-      deps.metrics.creditsCharged.inc({ reason: 'charged_cache_hit' }, item.credits);
       continue;
     }
 
@@ -278,15 +230,12 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
       });
     }
 
-    const charge = chargeFor({ section, listCredits: item.list, cached: false });
-    breakdown.push({ capability, credits: charge.credits, cached: false });
-    deps.metrics.creditsCharged.inc({ reason: charge.reason }, charge.credits);
-    if (charge.credits === 0 && routed.attempts.some((a) => a.costUsd > 0)) {
-      const last = routed.attempts[routed.attempts.length - 1];
-      deps.metrics.absorbedCostUsd.inc(
-        { provider_id: last?.providerId ?? 'unknown', reason: charge.reason },
-        last?.costUsd ?? 0,
-      );
+    breakdown.push({ capability, credits: 0, cached: false });
+    // 100% of provider spend is structurally unrecovered now -- there is no billing to recover any
+    // of it -- so the last attempt's cost is always visible here, not just on a failover leg.
+    const last = routed.attempts[routed.attempts.length - 1];
+    if (last !== undefined && last.costUsd > 0) {
+      deps.metrics.absorbedCostUsd.inc({ provider_id: last.providerId, reason: 'no_billing' }, last.costUsd);
     }
   }
 
@@ -320,19 +269,6 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
     });
   }
 
-  // ---- 6. Settle. Refund reserved-minus-actual as a new positive ledger row.
-  const chargedTotal = breakdown.reduce((sum, b) => sum + b.credits, 0);
-  if (reserved > chargedTotal) {
-    await deps.repos.credits.refund({
-      tenantId: request.tenantId,
-      credits: reserved - chargedTotal,
-      checkId,
-      reason: 'settle_refund',
-      idempotencyKey: `settle:${checkId}`,
-    });
-    reserved = chargedTotal;
-  }
-
   const completedAt = now();
   const list = [...sections.values()];
   const summary = deriveVerdict(list);
@@ -356,9 +292,10 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
       reasons: reasonsFor(list),
       sections_unavailable: summary.sections_unavailable,
     },
+    // Honest, not merely zeroed: there is no billing at all any more. `breakdown` keeps which
+    // capabilities ran and whether they were cached; `credits` is always 0.
     billing: {
-      credits_charged: chargedTotal,
-      credits_remaining: await deps.repos.credits.balance(request.tenantId),
+      credits_charged: 0,
       breakdown,
     },
     disclaimer: DISCLAIMER,
@@ -377,7 +314,7 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
   await deps.repos.checks.update(checkId, {
     status: report.status,
     verdict: report.summary.verdict,
-    creditsCharged: chargedTotal,
+    creditsCharged: 0,
     completedAt: anyPending ? undefined : completedAt,
   });
 
@@ -386,12 +323,6 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
 
 function hasDecidingField(capability: Capability, present: readonly CanonicalField[]): boolean {
   return fieldsFor(capability).some((f) => present.includes(f) && capabilityOf(f) === capability);
-}
-
-function listPriceFor(deps: RunCheckDeps, capability: Capability, tac: string): number {
-  const candidates = deps.router.candidates(capability, tac);
-  // Cheapest first, matching the order the router will actually try them in.
-  return candidates[0]?.service.credits ?? 0;
 }
 
 function offlineIdentity(directory: TacDirectory, imei: Imei, checkedAt: Date): SectionResult {
@@ -486,81 +417,4 @@ const LABELS: Readonly<Record<Capability, string>> = {
 
 function label(capability: Capability): string {
   return LABELS[capability];
-}
-
-interface Granted {
-  readonly granted: ReadonlySet<Capability>;
-  readonly reservedCredits: number;
-  reasonFor(capability: Capability): 'insufficient_credits' | 'rate_limited_upstream';
-  detailFor(capability: Capability): string;
-}
-
-/**
- * Reserves what the balance covers, in requested order, and reports what it could not.
- *
- * Cheapest-first would maximise the number of answers, but it would also silently reorder the
- * caller's priorities -- someone who asks for blacklist first wants blacklist first, and running
- * out of credit is not a reason to give them something else instead.
- */
-async function reserveWhatWeCan(args: {
-  credits: CreditRepo;
-  tenantId: string;
-  checkId: string;
-  quote: ReadonlyArray<{ capability: Capability; credits: number; cached: boolean }>;
-  idempotencyKey: string;
-  allowPaid: boolean;
-  allowUncached: boolean;
-}): Promise<Granted> {
-  const granted = new Set<Capability>();
-  const blocked = new Map<Capability, 'insufficient_credits' | 'rate_limited_upstream'>();
-  let toReserve = 0;
-
-  let balance = await args.credits.balance(args.tenantId);
-
-  for (const item of args.quote) {
-    if (!args.allowPaid && item.credits > 0) {
-      blocked.set(item.capability, 'rate_limited_upstream');
-      continue;
-    }
-    if (!args.allowUncached && !item.cached) {
-      blocked.set(item.capability, 'rate_limited_upstream');
-      continue;
-    }
-    if (item.credits > balance) {
-      blocked.set(item.capability, 'insufficient_credits');
-      continue;
-    }
-    balance -= item.credits;
-    toReserve += item.credits;
-    granted.add(item.capability);
-  }
-
-  if (toReserve > 0) {
-    const result = await args.credits.reserve({
-      tenantId: args.tenantId,
-      credits: toReserve,
-      checkId: args.checkId,
-      idempotencyKey: `reserve:${args.idempotencyKey}`,
-    });
-    if (!result.ok) {
-      // Lost a race against a concurrent check. Every paid capability becomes unavailable, and
-      // nothing is charged -- the honest outcome, and it costs us nothing because no supplier has
-      // been called yet.
-      for (const item of args.quote) {
-        granted.delete(item.capability);
-        blocked.set(item.capability, 'insufficient_credits');
-      }
-      toReserve = 0;
-    }
-  }
-
-  return {
-    granted,
-    reservedCredits: toReserve,
-    reasonFor: (capability) => blocked.get(capability) ?? 'insufficient_credits',
-    detailFor: (capability) =>
-      blocked.get(capability) === 'rate_limited_upstream'
-        ? 'Paid lookups are temporarily restricted on this account. Cached answers are still served.'
-        : 'Your credit balance did not cover this capability. The capabilities it did cover were run.',
-  };
 }

@@ -2,12 +2,10 @@ import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { DhruRestProvider, type CatalogueService } from '@imei-check/providers';
 import { BUILTIN_LEXICONS } from '@imei-check/providers';
-import { MemoryRepositories, generateTenantSalt } from '@imei-check/core';
+import { generateTenantSalt } from '@imei-check/core';
 import { CLEAN, FakeProvider, idempotencyKey, makePaidApp } from './paid-helpers.js';
 import { SENTINEL } from './helpers.js';
-import { EnumerationGuard, bucketOf, levelFor, DEFAULT_POLICY } from '../src/abuse/enumeration.js';
 import { ConcurrencyGate, TokenBucketLimiter } from '../src/abuse/ratelimit.js';
-import { isPrivateHost } from '../src/routes/account.js';
 import { bearerFrom, generateApiKey, hashApiKey, looksLikeApiKey } from '../src/auth/keys.js';
 
 const WEBHOOK_SECRET = 'a-shared-secret-for-webhook-signing';
@@ -139,85 +137,6 @@ describe('supplier feedback webhook', () => {
     });
     expect(response.statusCode).toBe(400);
     expect(response.body).not.toContain('key rotation');
-  });
-});
-
-describe('enumeration detection', () => {
-  it('buckets by TAC and the first three serial digits, storing no IMEI', () => {
-    //  35310411 | 234 | 5676
-    //  \__TAC__/  \_/  \__/  -- 1000 buckets per TAC, and no IMEI is retained anywhere.
-    //             bucket
-    expect(bucketOf('353104112345676')).toBe(234);
-    expect(bucketOf('353104110005676')).toBe(0);
-  });
-
-  it('climbs the ladder as distinct buckets accumulate', () => {
-    expect(levelFor(10, DEFAULT_POLICY)).toBe('none');
-    expect(levelFor(150, DEFAULT_POLICY)).toBe('throttled');
-    expect(levelFor(350, DEFAULT_POLICY)).toBe('cache_only');
-    expect(levelFor(650, DEFAULT_POLICY)).toBe('no_paid');
-    expect(levelFor(950, DEFAULT_POLICY)).toBe('suspended');
-  });
-
-  it('a shop checking many of one model is not restricted', async () => {
-    const repos = new MemoryRepositories();
-    await repos.tenants.create({
-      id: 't1', name: 'Shop', plan: 'std', status: 'active', imeiSalt: generateTenantSalt(),
-    });
-    const guard = new EnumerationGuard(repos.abuse);
-    const now = new Date();
-
-    let level = 'none';
-    for (let i = 0; i < 60; i += 1) {
-      const result = await guard.observe({
-        tenantId: 't1',
-        tac: '35310411',
-        imeiDigits: `35310411${String(i).padStart(3, '0')}0000`,
-        now,
-      });
-      level = result.level;
-    }
-    // 60 distinct handsets of one model in an hour is a real business, not a sweep.
-    expect(level).toBe('none');
-  });
-
-  it('a sweep across a TAC trips the ladder', async () => {
-    const repos = new MemoryRepositories();
-    await repos.tenants.create({
-      id: 't1', name: 'Sweeper', plan: 'std', status: 'active', imeiSalt: generateTenantSalt(),
-    });
-    const guard = new EnumerationGuard(repos.abuse);
-    const now = new Date();
-
-    let level = 'none';
-    for (let i = 0; i < 400; i += 1) {
-      const result = await guard.observe({
-        tenantId: 't1',
-        tac: '35310411',
-        imeiDigits: `35310411${String(i % 1000).padStart(3, '0')}0000`,
-        now,
-      });
-      level = result.level;
-    }
-    expect(['cache_only', 'no_paid', 'suspended']).toContain(level);
-  });
-
-  it('never relaxes a restriction on its own', async () => {
-    const repos = new MemoryRepositories();
-    await repos.tenants.create({
-      id: 't1', name: 'T', plan: 'std', status: 'active', imeiSalt: generateTenantSalt(),
-    });
-    await repos.abuse.restrict('t1', 'no_paid', 'operator applied');
-
-    const guard = new EnumerationGuard(repos.abuse);
-    const result = await guard.observe({
-      tenantId: 't1',
-      tac: '35310411',
-      imeiDigits: '353104112345676',
-      now: new Date(),
-    });
-    // A sweeper who waits an hour must not simply resume.
-    expect(result.level).toBe('no_paid');
   });
 });
 
@@ -375,50 +294,6 @@ describe('api keys', () => {
     expect(bearerFrom('bearer abc')).toBe('abc');
     expect(bearerFrom('Basic abc')).toBeUndefined();
     expect(bearerFrom(undefined)).toBeUndefined();
-  });
-});
-
-describe('outbound webhook registration', () => {
-  it('refuses private and plaintext destinations', () => {
-    for (const host of ['localhost', '127.0.0.1', '10.1.1.1', '192.168.0.5', '169.254.169.254', 'metadata.google.internal']) {
-      expect(isPrivateHost(host)).toBe(true);
-    }
-    expect(isPrivateHost('hooks.example.com')).toBe(false);
-  });
-
-  it('rejects an http:// webhook over the wire', async () => {
-    const harness = await makePaidApp();
-    const response = await harness.app.inject({
-      method: 'POST',
-      url: '/v1/webhooks',
-      headers: harness.auth(),
-      payload: { url: 'http://hooks.example.com/imei' },
-    });
-    expect(response.statusCode).toBe(400);
-    expect(response.json().error.code).toBe('insecure_webhook_url');
-  });
-
-  it('rejects an SSRF target', async () => {
-    const harness = await makePaidApp();
-    const response = await harness.app.inject({
-      method: 'POST',
-      url: '/v1/webhooks',
-      headers: harness.auth(),
-      payload: { url: 'https://169.254.169.254/latest/meta-data' },
-    });
-    expect(response.statusCode).toBe(400);
-  });
-
-  it('returns the signing secret exactly once, on registration', async () => {
-    const harness = await makePaidApp();
-    const response = await harness.app.inject({
-      method: 'POST',
-      url: '/v1/webhooks',
-      headers: harness.auth(),
-      payload: { url: 'https://hooks.example.com/imei' },
-    });
-    expect(response.statusCode).toBe(201);
-    expect(response.json().secret).toBeTruthy();
   });
 });
 

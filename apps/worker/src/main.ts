@@ -1,24 +1,20 @@
 import pino from 'pino';
 import { Metrics, PgRepositories, createPool } from '@imei-check/core';
 import { pollOrders } from './jobs/poll-orders.js';
-import { deliverWebhooks } from './jobs/deliver-webhooks.js';
-import { reconcile } from './jobs/reconcile.js';
 
 /**
  * The worker loop.
  *
- * Separate process from the API for one reason that matters operationally: a poll storm or a slow
- * webhook receiver must not consume the connection pool that paid checks need. The two have very
- * different latency requirements and they should fail independently.
+ * Separate process from the API for one reason that matters operationally: a poll storm must not
+ * consume the connection pool that paid checks need, and the two have very different latency
+ * requirements and should fail independently.
  *
- * Every job is idempotent and every job claims its rows with `FOR UPDATE SKIP LOCKED`, so running
- * two workers is safe and is the intended way to scale this.
+ * Every job is idempotent and claims its rows with `FOR UPDATE SKIP LOCKED`, so running two
+ * workers is safe and is the intended way to scale this.
  */
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const POLL_INTERVAL_MS = Number(process.env['WORKER_POLL_INTERVAL_MS'] ?? 30_000);
-const WEBHOOK_INTERVAL_MS = Number(process.env['WORKER_WEBHOOK_INTERVAL_MS'] ?? 15_000);
-const RECONCILE_INTERVAL_MS = Number(process.env['WORKER_RECONCILE_INTERVAL_MS'] ?? 6 * 60 * 60 * 1000);
 
 const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
 
@@ -35,7 +31,7 @@ const repos = new PgRepositories(
 const metrics = new Metrics();
 
 // Providers are not built here yet: the worker only polls suppliers it was configured for, and a
-// worker with no providers still does useful work (webhooks, reconciliation, cache purging).
+// worker with no providers still does useful work (cache purging via future jobs).
 const providers: [] = [];
 
 let running = true;
@@ -48,7 +44,7 @@ async function loop(name: string, intervalMs: number, job: () => Promise<unknown
       logger.debug({ job: name, result, ms: Date.now() - startedAt }, 'job finished');
     } catch (error) {
       // A failing job must not kill the loop: the next tick is a free retry, and a crashed worker
-      // silently stops settling orders that tenants have already been charged for.
+      // silently stops settling orders that are still awaiting an answer.
       logger.error({ job: name, err: error }, 'job failed');
     }
     await sleep(Math.max(1_000, intervalMs - (Date.now() - startedAt)));
@@ -67,7 +63,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   });
 }
 
-logger.info({ intervals: { POLL_INTERVAL_MS, WEBHOOK_INTERVAL_MS, RECONCILE_INTERVAL_MS } }, 'worker started');
+logger.info({ intervals: { POLL_INTERVAL_MS } }, 'worker started');
 
 await Promise.all([
   loop('poll-orders', POLL_INTERVAL_MS, () =>
@@ -77,20 +73,6 @@ await Promise.all([
       tacDirectory: { lookup: () => undefined, version: 'worker', size: 0, attribution: undefined },
       metrics,
       log: (event, message) => logger.info(event, message),
-    }),
-  ),
-  loop('deliver-webhooks', WEBHOOK_INTERVAL_MS, () =>
-    deliverWebhooks({ repos, log: (event, message) => logger.info(event, message) }),
-  ),
-  loop('reconcile', RECONCILE_INTERVAL_MS, async () =>
-    reconcile({
-      repos,
-      providers,
-      metrics,
-      // Re-read every tick rather than at boot: a worker that has been up for a week would
-      // otherwise never assert the ledger of any tenant onboarded since it started.
-      tenantIds: (await repos.tenants.listAll()).map((t) => t.id),
-      log: (event, message) => logger.warn(event, message),
     }),
   ),
 ]);

@@ -34,16 +34,15 @@ async function post(
 }
 
 describe('POST /v1/checks', () => {
-  it('answers a clean device and charges list price', async () => {
-    const harness = await makePaidApp({ credits: 100 });
+  it('answers a clean device and charges nothing', async () => {
+    const harness = await makePaidApp();
     const response = await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
 
     expect(response.statusCode).toBe(200);
     const report = response.json<CheckReport>();
     expect(report.sections['blacklist.gsma']?.outcome).toBe('pass');
     expect(report.summary.verdict).toBe('green');
-    expect(report.billing.credits_charged).toBe(3);
-    expect(await harness.repos.credits.balance('ten_test')).toBe(97);
+    expect(report.billing.credits_charged).toBe(0);
     assertEnvelopeInvariants(report);
   });
 
@@ -73,39 +72,37 @@ describe('POST /v1/checks', () => {
   });
 
   it('charges nothing when the supplier is down', async () => {
-    const harness = await makePaidApp({ providers: [new FakeProvider('fake', TIMEOUT)], credits: 100 });
+    const harness = await makePaidApp({ providers: [new FakeProvider('fake', TIMEOUT)] });
     const report = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
 
     expect(report.billing.credits_charged).toBe(0);
-    expect(await harness.repos.credits.balance('ten_test')).toBe(100);
   });
 
   /** Our lexicon gap. Amber, and free. */
   it('renders a reworded supplier status as amber and charges nothing for it', async () => {
-    const harness = await makePaidApp({ providers: [new FakeProvider('fake', REWORDED)], credits: 100 });
+    const harness = await makePaidApp({ providers: [new FakeProvider('fake', REWORDED)] });
     const report = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
 
     expect(report.sections['blacklist.gsma']?.outcome).toBe('inconclusive');
     expect(report.sections['blacklist.gsma']?.reason).toBe('unrecognised_provider_value');
     expect(report.summary.verdict).not.toBe('green');
     expect(report.billing.credits_charged).toBe(0);
-    expect(await harness.repos.credits.balance('ten_test')).toBe(100);
   });
 
-  it('serves the second identical request from cache, at 20% of list', async () => {
+  it('serves the second identical request from cache, and still charges nothing', async () => {
     const provider = new FakeProvider('fake', CLEAN);
-    const harness = await makePaidApp({ providers: [provider], credits: 100 });
+    const harness = await makePaidApp({ providers: [provider] });
 
     await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
     const second = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
 
     expect(provider.executed).toHaveLength(1);
     expect(second.sections['blacklist.gsma']?.freshness.cached).toBe(true);
-    expect(second.billing.credits_charged).toBe(1);
+    expect(second.billing.credits_charged).toBe(0);
   });
 
   it('a cache hit reports the ORIGINAL checked_at, not now', async () => {
-    const harness = await makePaidApp({ credits: 100 });
+    const harness = await makePaidApp();
     const first = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
     const second = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
 
@@ -114,9 +111,9 @@ describe('POST /v1/checks', () => {
     );
   });
 
-  it('max_age_seconds: 0 bypasses the cache at full price', async () => {
+  it('max_age_seconds: 0 bypasses the cache and still charges nothing', async () => {
     const provider = new FakeProvider('fake', CLEAN);
-    const harness = await makePaidApp({ providers: [provider], credits: 100 });
+    const harness = await makePaidApp({ providers: [provider] });
 
     await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
     const fresh = (
@@ -125,14 +122,14 @@ describe('POST /v1/checks', () => {
 
     expect(provider.executed).toHaveLength(2);
     expect(fresh.sections['blacklist.gsma']?.freshness.cached).toBe(false);
-    expect(fresh.billing.credits_charged).toBe(3);
+    expect(fresh.billing.credits_charged).toBe(0);
   });
 });
 
 describe('idempotency', () => {
-  it('replays the first response and does not charge twice', async () => {
+  it('replays the first response and does not re-run the provider', async () => {
     const provider = new FakeProvider('fake', CLEAN);
-    const harness = await makePaidApp({ providers: [provider], credits: 100 });
+    const harness = await makePaidApp({ providers: [provider] });
     const key = idempotencyKey();
 
     const first = await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] }, key);
@@ -141,11 +138,10 @@ describe('idempotency', () => {
     expect(retry.statusCode).toBe(200);
     expect(retry.json<CheckReport>().check_id).toBe(first.json<CheckReport>().check_id);
     expect(provider.executed).toHaveLength(1);
-    expect(await harness.repos.credits.balance('ten_test')).toBe(97);
   });
 
   it('rejects the same key used for a different device', async () => {
-    const harness = await makePaidApp({ credits: 100 });
+    const harness = await makePaidApp();
     const key = idempotencyKey();
 
     await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] }, key);
@@ -170,10 +166,11 @@ describe('idempotency', () => {
 
 describe('credits', () => {
   /**
-   * Partial affordability is honoured. A 402 that kills the whole check throws away answers we
-   * could have given and already paid nothing for.
+   * Billing was removed entirely: there is no "on" state, no balance, and therefore no
+   * affordability gate left to trip. Every requested capability simply runs, and
+   * `insufficient_credits` never appears anywhere in a report again.
    */
-  it('runs what the balance covers and marks the rest unavailable(insufficient_credits)', async () => {
+  it('runs every requested capability with zero credits, never unavailable(insufficient_credits)', async () => {
     const provider = new FakeProvider('fake', CLEAN, [
       service({ providerId: 'fake', serviceId: 'bl', capabilities: ['blacklist.gsma'], credits: 3 }),
       service({
@@ -184,30 +181,18 @@ describe('credits', () => {
         credits: 8,
       }),
     ]);
-    const harness = await makePaidApp({ providers: [provider], credits: 3 });
+    const harness = await makePaidApp({ providers: [provider] });
 
     const report = (
       await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma', 'lock.activation'] })
     ).json<CheckReport>();
 
     expect(report.sections['blacklist.gsma']?.outcome).toBe('pass');
-    expect(report.sections['lock.activation']?.outcome).toBe('unavailable');
-    expect(report.sections['lock.activation']?.reason).toBe('insufficient_credits');
-    expect(report.billing.credits_charged).toBe(3);
-  });
-
-  it('never lets the balance go negative', async () => {
-    const harness = await makePaidApp({ credits: 1 });
-    await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
-    expect(await harness.repos.credits.balance('ten_test')).toBeGreaterThanOrEqual(0);
-  });
-
-  it('keeps the ledger and the cached balance in agreement', async () => {
-    const harness = await makePaidApp({ credits: 100 });
-    await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
-    await post(harness, { imei: '356920051234564', capabilities: ['blacklist.gsma'] });
-
-    expect((await harness.repos.credits.reconcile('ten_test')).drift).toBe(0);
+    // Neither section is gated on affordability -- both ran, so neither is `unavailable`.
+    expect(report.sections['lock.activation']?.outcome).not.toBe('unavailable');
+    expect(report.billing.credits_charged).toBe(0);
+    expect(report.billing.breakdown.every((b) => b.credits === 0)).toBe(true);
+    expect(JSON.stringify(report)).not.toContain('insufficient_credits');
   });
 });
 
@@ -261,21 +246,20 @@ describe('auth', () => {
 });
 
 describe('the Luhn gate', () => {
-  it('rejects an invalid IMEI before spending anything', async () => {
+  it('rejects an invalid IMEI before calling the provider', async () => {
     const provider = new FakeProvider('fake', CLEAN);
-    const harness = await makePaidApp({ providers: [provider], credits: 100 });
+    const harness = await makePaidApp({ providers: [provider] });
 
     const response = await post(harness, { imei: '353104112345670' });
 
     expect(response.statusCode).toBe(400);
     expect(provider.executed).toEqual([]);
-    expect(await harness.repos.credits.balance('ten_test')).toBe(100);
   });
 });
 
 describe('GET /v1/checks/:id', () => {
   it('returns a stored check, and 404 for another tenant’s id', async () => {
-    const harness = await makePaidApp({ credits: 100 });
+    const harness = await makePaidApp();
     const created = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
 
     const found = await harness.app.inject({

@@ -10,6 +10,10 @@ get {
   auth: none
 }
 
+headers {
+  authorization: Bearer {{apiKey}}
+}
+
 assert {
   res.status: eq 404
   res.body.error.code: eq tac_not_found

@@ -1,30 +1,21 @@
 import pg from 'pg';
 import type {
-  AbuseRepo,
   ApiKeyRecord,
   ApiKeyRepo,
   CacheRepo,
   CacheRow,
   CheckRecord,
   CheckRepo,
-  CreditRepo,
   IdempotencyRecord,
   IdempotencyRepo,
-  LedgerEntry,
-  LedgerReason,
   OrderRepo,
   OrderRow,
   ProviderCallRepo,
   ProviderCallRow,
   Repositories,
-  ReserveResult,
-  RestrictionLevel,
   StoredSection,
   Tenant,
   TenantRepo,
-  WebhookDelivery,
-  WebhookEndpoint,
-  WebhookRepo,
 } from './types.js';
 import type { Capability, Coverage, Outcome, SectionResult, Verdict } from '@imei-check/contract';
 import { assertStrongTenantSalt } from './tenant-salt.js';
@@ -88,7 +79,7 @@ export function createPool(databaseUrl: string, options: PoolOptions = {}): pg.P
  * it honest is a test's job rather than a comment's -- `schema-version.test.ts` fails the moment a
  * migration is added without bumping it.
  */
-export const REQUIRED_SCHEMA_VERSION = '20260913000001';
+export const REQUIRED_SCHEMA_VERSION = '20260916000001';
 
 export interface DatabaseReadiness {
   readonly reachable: boolean;
@@ -151,26 +142,20 @@ function isUndefinedTable(error: unknown): boolean {
 export class PgRepositories implements Repositories {
   readonly tenants: TenantRepo;
   readonly apiKeys: ApiKeyRepo;
-  readonly credits: CreditRepo;
   readonly checks: CheckRepo;
   readonly providerCalls: ProviderCallRepo;
   readonly cache: CacheRepo;
   readonly orders: OrderRepo;
   readonly idempotency: IdempotencyRepo;
-  readonly abuse: AbuseRepo;
-  readonly webhooks: WebhookRepo;
 
   constructor(private readonly pool: pg.Pool) {
     this.tenants = new PgTenantRepo(pool);
     this.apiKeys = new PgApiKeyRepo(pool);
-    this.credits = new PgCreditRepo(pool);
     this.checks = new PgCheckRepo(pool);
     this.providerCalls = new PgProviderCallRepo(pool);
     this.cache = new PgCacheRepo(pool);
     this.orders = new PgOrderRepo(pool);
     this.idempotency = new PgIdempotencyRepo(pool);
-    this.abuse = new PgAbuseRepo(pool);
-    this.webhooks = new PgWebhookRepo(pool);
   }
 
   async close(): Promise<void> {
@@ -204,11 +189,6 @@ class PgTenantRepo implements TenantRepo {
       `INSERT INTO tenants (id, name, plan, status, imei_salt) VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (id) DO NOTHING`,
       [tenant.id, tenant.name, tenant.plan, tenant.status, tenant.imeiSalt],
-    );
-    await this.pool.query(
-      `INSERT INTO credit_accounts (tenant_id, balance_credits) VALUES ($1, 0)
-       ON CONFLICT (tenant_id) DO NOTHING`,
-      [tenant.id],
     );
   }
   async listAll(): Promise<readonly Tenant[]> {
@@ -263,161 +243,6 @@ class PgApiKeyRepo implements ApiKeyRepo {
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [record.id, record.tenantId, record.prefix, record.keySha256, record.scopes, record.expiresAt ?? null],
     );
-  }
-}
-
-class PgCreditRepo implements CreditRepo {
-  constructor(private readonly pool: pg.Pool) {}
-
-  async balance(tenantId: string): Promise<number> {
-    const { rows } = await this.pool.query<{ balance_credits: string }>(
-      'SELECT balance_credits FROM credit_accounts WHERE tenant_id = $1',
-      [tenantId],
-    );
-    return Number(rows[0]?.balance_credits ?? 0);
-  }
-
-  async topUp(tenantId: string, credits: number, idempotencyKey?: string): Promise<number> {
-    return this.append(tenantId, credits, 'topup', undefined, idempotencyKey);
-  }
-
-  /**
-   * Atomic, idempotent debit.
-   *
-   * `FOR UPDATE` serialises concurrent checks for one tenant, so two checks cannot each see enough
-   * balance and both spend it. The ledger insert carries the idempotency key under a UNIQUE
-   * constraint, so a retry raises 23505 and we return the already-charged state instead of
-   * charging again -- a read-then-write would let a retry slip through between the two statements.
-   */
-  async reserve(args: {
-    tenantId: string;
-    credits: number;
-    checkId: string;
-    idempotencyKey: string;
-  }): Promise<ReserveResult> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const { rows } = await client.query<{ balance_credits: string }>(
-        'SELECT balance_credits FROM credit_accounts WHERE tenant_id = $1 FOR UPDATE',
-        [args.tenantId],
-      );
-      const balance = Number(rows[0]?.balance_credits ?? 0);
-
-      if (balance < args.credits) {
-        await client.query('ROLLBACK');
-        return { ok: false, shortfall: args.credits - balance, balance };
-      }
-
-      const after = balance - args.credits;
-      await client.query(
-        `INSERT INTO credit_ledger (tenant_id, delta, reason, check_id, balance_after, idempotency_key)
-         VALUES ($1,$2,'reserve',$3,$4,$5)`,
-        [args.tenantId, -args.credits, args.checkId, after, args.idempotencyKey],
-      );
-      // Same transaction as the ledger row: a balance that can disagree with its ledger is not an
-      // accounting system.
-      await client.query(
-        'UPDATE credit_accounts SET balance_credits = $2, updated_at = now() WHERE tenant_id = $1',
-        [args.tenantId, after],
-      );
-      await client.query('COMMIT');
-      return { ok: true, reserved: args.credits, balanceAfter: after };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      if (isUniqueViolation(error)) {
-        // Already reserved under this key. Not an error: it is the guarantee working.
-        return { ok: true, reserved: 0, balanceAfter: await this.balance(args.tenantId) };
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async refund(args: {
-    tenantId: string;
-    credits: number;
-    checkId: string;
-    reason: LedgerReason;
-    idempotencyKey: string;
-  }): Promise<number> {
-    if (args.credits <= 0) return this.balance(args.tenantId);
-    return this.append(args.tenantId, args.credits, args.reason, args.checkId, args.idempotencyKey);
-  }
-
-  async ledger(tenantId: string, limit: number): Promise<readonly LedgerEntry[]> {
-    const { rows } = await this.pool.query<{
-      id: string;
-      tenant_id: string;
-      delta: string;
-      reason: string;
-      check_id: string | null;
-      balance_after: string;
-      idempotency_key: string | null;
-      created_at: Date;
-    }>(
-      `SELECT id, tenant_id, delta, reason, check_id, balance_after, idempotency_key, created_at
-       FROM credit_ledger WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`,
-      [tenantId, limit],
-    );
-    return rows.map((row) => ({
-      id: Number(row.id),
-      tenantId: row.tenant_id,
-      delta: Number(row.delta),
-      reason: row.reason as LedgerReason,
-      checkId: row.check_id ?? undefined,
-      balanceAfter: Number(row.balance_after),
-      idempotencyKey: row.idempotency_key ?? undefined,
-      createdAt: row.created_at,
-    }));
-  }
-
-  async reconcile(tenantId: string): Promise<{ cached: number; summed: number; drift: number }> {
-    const { rows } = await this.pool.query<{ cached: string; summed: string }>(
-      `SELECT
-         (SELECT balance_credits FROM credit_accounts WHERE tenant_id = $1) AS cached,
-         (SELECT COALESCE(SUM(delta),0) FROM credit_ledger WHERE tenant_id = $1) AS summed`,
-      [tenantId],
-    );
-    const cached = Number(rows[0]?.cached ?? 0);
-    const summed = Number(rows[0]?.summed ?? 0);
-    return { cached, summed, drift: cached - summed };
-  }
-
-  private async append(
-    tenantId: string,
-    delta: number,
-    reason: LedgerReason,
-    checkId: string | undefined,
-    idempotencyKey: string | undefined,
-  ): Promise<number> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const { rows } = await client.query<{ balance_credits: string }>(
-        'SELECT balance_credits FROM credit_accounts WHERE tenant_id = $1 FOR UPDATE',
-        [tenantId],
-      );
-      const after = Number(rows[0]?.balance_credits ?? 0) + delta;
-      await client.query(
-        `INSERT INTO credit_ledger (tenant_id, delta, reason, check_id, balance_after, idempotency_key)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [tenantId, delta, reason, checkId ?? null, after, idempotencyKey ?? null],
-      );
-      await client.query(
-        'UPDATE credit_accounts SET balance_credits = $2, updated_at = now() WHERE tenant_id = $1',
-        [tenantId, after],
-      );
-      await client.query('COMMIT');
-      return after;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      if (isUniqueViolation(error)) return this.balance(tenantId);
-      throw error;
-    } finally {
-      client.release();
-    }
   }
 }
 
@@ -766,134 +591,3 @@ class PgIdempotencyRepo implements IdempotencyRepo {
   }
 }
 
-class PgAbuseRepo implements AbuseRepo {
-  constructor(private readonly pool: pg.Pool) {}
-  async record(tenantId: string, tac: string, bucket: number, windowStart: Date): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO enumeration_buckets (tenant_id, tac, bucket, window_start, hits)
-       VALUES ($1,$2,$3,$4,1)
-       ON CONFLICT (tenant_id, tac, bucket, window_start) DO UPDATE SET hits = enumeration_buckets.hits + 1`,
-      [tenantId, tac, bucket, windowStart],
-    );
-  }
-  async distinctBuckets(tenantId: string, tac: string, since: Date): Promise<number> {
-    const { rows } = await this.pool.query<{ count: string }>(
-      `SELECT COUNT(DISTINCT bucket) AS count FROM enumeration_buckets
-       WHERE tenant_id = $1 AND tac = $2 AND window_start >= $3`,
-      [tenantId, tac, since],
-    );
-    return Number(rows[0]?.count ?? 0);
-  }
-  async restriction(tenantId: string): Promise<{ level: RestrictionLevel; reason: string | undefined }> {
-    const { rows } = await this.pool.query<{ level: string; reason: string | null; expires_at: Date | null }>(
-      'SELECT level, reason, expires_at FROM tenant_restrictions WHERE tenant_id = $1',
-      [tenantId],
-    );
-    const row = rows[0];
-    if (row === undefined) return { level: 'none', reason: undefined };
-    if (row.expires_at !== null && row.expires_at <= new Date()) {
-      return { level: 'none', reason: undefined };
-    }
-    return { level: row.level as RestrictionLevel, reason: row.reason ?? undefined };
-  }
-  async restrict(tenantId: string, level: RestrictionLevel, reason: string, expiresAt?: Date): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO tenant_restrictions (tenant_id, level, reason, expires_at)
-       VALUES ($1,$2,$3,$4)
-       ON CONFLICT (tenant_id) DO UPDATE SET
-         level = EXCLUDED.level, reason = EXCLUDED.reason,
-         expires_at = EXCLUDED.expires_at, applied_at = now()`,
-      [tenantId, level, reason, expiresAt ?? null],
-    );
-  }
-}
-
-class PgWebhookRepo implements WebhookRepo {
-  constructor(private readonly pool: pg.Pool) {}
-  async endpointsFor(tenantId: string, event: string): Promise<readonly WebhookEndpoint[]> {
-    const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT id, tenant_id, url, secret, events, active FROM webhook_endpoints
-       WHERE tenant_id = $1 AND active AND $2 = ANY(events)`,
-      [tenantId, event],
-    );
-    return rows.map((row) => ({
-      id: String(row['id']),
-      tenantId: String(row['tenant_id']),
-      url: String(row['url']),
-      secret: String(row['secret']),
-      events: row['events'] as string[],
-      active: row['active'] === true,
-    }));
-  }
-  async endpointById(id: string): Promise<WebhookEndpoint | undefined> {
-    const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT id, tenant_id, url, secret, events, active FROM webhook_endpoints WHERE id = $1',
-      [id],
-    );
-    const row = rows[0];
-    if (row === undefined) return undefined;
-    return {
-      id: String(row['id']),
-      tenantId: String(row['tenant_id']),
-      url: String(row['url']),
-      secret: String(row['secret']),
-      events: row['events'] as string[],
-      active: row['active'] === true,
-    };
-  }
-  async register(endpoint: WebhookEndpoint): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO webhook_endpoints (id, tenant_id, url, secret, events, active)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [endpoint.id, endpoint.tenantId, endpoint.url, endpoint.secret, endpoint.events, endpoint.active],
-    );
-  }
-  async enqueue(delivery: WebhookDelivery): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO webhook_deliveries
-         (id, endpoint_id, check_id, event, payload, status, attempts, next_retry_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [
-        delivery.id, delivery.endpointId, delivery.checkId, delivery.event,
-        JSON.stringify(delivery.payload), delivery.status, delivery.attempts,
-        delivery.nextRetryAt ?? null,
-      ],
-    );
-  }
-  async due(now: Date, limit: number): Promise<readonly WebhookDelivery[]> {
-    const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT id, endpoint_id, check_id, event, payload, status, attempts, next_retry_at, last_status
-       FROM webhook_deliveries
-       WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= $1)
-       ORDER BY created_at LIMIT $2
-       FOR UPDATE SKIP LOCKED`,
-      [now, limit],
-    );
-    return rows.map((row) => ({
-      id: String(row['id']),
-      endpointId: String(row['endpoint_id']),
-      checkId: String(row['check_id']),
-      event: String(row['event']),
-      payload: row['payload'],
-      status: row['status'] as WebhookDelivery['status'],
-      attempts: Number(row['attempts'] ?? 0),
-      nextRetryAt: (row['next_retry_at'] as Date | null) ?? undefined,
-      lastStatus: (row['last_status'] as number | null) ?? undefined,
-    }));
-  }
-  async markDelivery(id: string, patch: Partial<WebhookDelivery>): Promise<void> {
-    await this.pool.query(
-      `UPDATE webhook_deliveries SET
-         status = COALESCE($2, status), attempts = COALESCE($3, attempts),
-         next_retry_at = $4, last_status = COALESCE($5, last_status),
-         delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END
-       WHERE id = $1`,
-      [id, patch.status ?? null, patch.attempts ?? null, patch.nextRetryAt ?? null, patch.lastStatus ?? null],
-    );
-  }
-}
-
-/** 23505 is unique_violation. It is the mechanism, not an error, wherever idempotency is claimed. */
-function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: string }).code === '23505';
-}

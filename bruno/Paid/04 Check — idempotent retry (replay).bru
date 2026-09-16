@@ -37,14 +37,16 @@ tests {
     expect(res.getBody().check_id).to.equal(bru.getVar("firstCheckId"));
   });
 
-  test("does not charge a second time", function () {
-    expect(res.getBody().billing.credits_remaining).to.equal(bru.getVar("balanceAfterFirstCall"));
+  test("still charges nothing on replay", function () {
+    expect(res.getBody().billing.credits_charged).to.equal(0);
+    expect(res.getBody().billing).to.not.have.property("credits_remaining");
   });
 }
 
 docs {
   Run **03 Check — idempotent retry (first call)** first — it generates the shared
-  `retryIdempotencyKey` and records what it charged. This request replays the identical
-  `Idempotency-Key`, same IMEI, same capabilities, and the response must be the FIRST response
-  replayed verbatim, not a second paid check.
+  `retryIdempotencyKey`. This request replays the identical `Idempotency-Key`, same IMEI, same
+  capabilities, and the response must be the FIRST response replayed verbatim, not a second paid
+  check — even though nothing is charged either way in single-consumer mode, a recomputed replay
+  answering differently would still break the promise the header makes.
 }

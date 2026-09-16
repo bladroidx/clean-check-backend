@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import type { CheckReport } from '@imei-check/contract';
 import type { ProviderOutcome } from '@imei-check/providers';
-import { CLEAN, FakeProvider, idempotencyKey, makePaidApp, service } from './paid-helpers.js';
+import {
+  BLOCKED,
+  CLEAN,
+  FakeProvider,
+  REWORDED,
+  TIMEOUT,
+  idempotencyKey,
+  makePaidApp,
+  service,
+} from './paid-helpers.js';
 import { SENTINEL } from './helpers.js';
 
 /**
  * Orchestration paths that are not the happy one.
  *
- * The abuse ladder, the async order lifecycle, derived capabilities and the offline tier all sit
- * inside `runCheck`, and each of them can turn an honest answer into a misleading one if it takes
- * the wrong branch.
+ * The async order lifecycle, derived capabilities and the offline tier all sit inside `runCheck`,
+ * and each of them can turn an honest answer into a misleading one if it takes the wrong branch.
  */
 
 function post(
@@ -120,53 +128,6 @@ describe('async orders', () => {
   });
 });
 
-describe('the abuse ladder', () => {
-  it('cache_only serves a cached answer and buys nothing new', async () => {
-    const provider = new FakeProvider('fake', CLEAN);
-    const harness = await makePaidApp({ providers: [provider], credits: 100 });
-
-    // Warm the cache while unrestricted.
-    await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
-    expect(provider.executed).toHaveLength(1);
-
-    await harness.repos.abuse.restrict('ten_test', 'cache_only', 'test');
-
-    const cached = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
-    expect(cached.sections['blacklist.gsma']?.outcome).toBe('pass');
-    expect(cached.sections['blacklist.gsma']?.freshness.cached).toBe(true);
-
-    // A device with nothing cached gets an honest unavailable rather than a paid call.
-    const uncached = (
-      await post(harness, { imei: '356920051234564', capabilities: ['blacklist.gsma'] })
-    ).json<CheckReport>();
-    expect(uncached.sections['blacklist.gsma']?.outcome).toBe('unavailable');
-    // The rung costs us nothing and still answers, which is what makes a false positive cheap.
-    expect(provider.executed).toHaveLength(1);
-  });
-
-  it('no_paid blocks spend but still returns a well-formed report', async () => {
-    const provider = new FakeProvider('fake', CLEAN);
-    const harness = await makePaidApp({ providers: [provider], credits: 100 });
-    await harness.repos.abuse.restrict('ten_test', 'no_paid', 'test');
-
-    const response = await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json<CheckReport>().sections['blacklist.gsma']?.outcome).toBe('unavailable');
-    expect(provider.executed).toEqual([]);
-    expect(await harness.repos.credits.balance('ten_test')).toBe(100);
-  });
-
-  it('suspended refuses the request outright', async () => {
-    const harness = await makePaidApp({ credits: 100 });
-    await harness.repos.abuse.restrict('ten_test', 'suspended', 'test');
-
-    const response = await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
-    expect(response.statusCode).toBe(429);
-    expect(response.json().error.code).toBe('account_restricted');
-  });
-});
-
 describe('capabilities preview', () => {
   it('prices a device without spending anything', async () => {
     const provider = new FakeProvider('fake', CLEAN);
@@ -183,12 +144,11 @@ describe('capabilities preview', () => {
     const body = response.json();
     expect(body.capabilities.find((c: { capability: string }) => c.capability === 'blacklist.gsma')).toMatchObject({
       available: true,
-      credits: 3,
+      credits: 0,
     });
     // identity.model and warranty.status are free: offline and derived respectively.
     expect(body.capabilities.find((c: { capability: string }) => c.capability === 'identity.model')?.credits).toBe(0);
     expect(provider.executed).toEqual([]);
-    expect(await harness.repos.credits.balance('ten_test')).toBe(100);
   });
 
   it('rejects an invalid IMEI', async () => {
@@ -203,28 +163,47 @@ describe('capabilities preview', () => {
   });
 });
 
-describe('balance and ledger', () => {
-  it('shows what was charged and why, in the billing vocabulary', async () => {
-    const harness = await makePaidApp({ credits: 100 });
-    await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
-
-    const response = await harness.app.inject({
-      method: 'GET',
-      url: '/v1/balance',
-      headers: harness.auth(),
-    });
-
-    expect(response.statusCode).toBe(200);
-    const body = response.json();
-    expect(body.credits_remaining).toBe(97);
-    expect(body.recent.map((e: { reason: string }) => e.reason)).toContain('reserve');
-  });
-
-  it('exposes Prometheus metrics including the drift alarm', async () => {
+describe('metrics', () => {
+  it('exposes Prometheus metrics including the format-drift and absorbed-cost alarms', async () => {
     const harness = await makePaidApp();
     const response = await harness.app.inject({ method: 'GET', url: '/metrics' });
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain('imei_lexicon_miss_total');
     expect(response.body).toContain('imei_absorbed_cost_usd_total');
+  });
+});
+
+/**
+ * All four arms, with billing permanently off.
+ *
+ * There is no billing flag left to waive a charge -- there is no billing at all -- so what this
+ * pins is that the arm selector still chooses correctly and every arm still charges nothing, none
+ * of the four may ever report anything other than `credits_charged: 0`.
+ */
+const ARM_MATRIX = [
+  ['clean', CLEAN, 'pass', undefined],
+  ['blacklisted', BLOCKED, 'fail', undefined],
+  ['reworded to an unknown phrase', REWORDED, 'inconclusive', 'unrecognised_provider_value'],
+  ['supplier timeout', TIMEOUT, 'unavailable', 'provider_timeout'],
+] as const;
+
+describe('every arm charges nothing', () => {
+  it.each(ARM_MATRIX)('%s -> %s', async (_label, outcome, arm, reason) => {
+    const harness = await makePaidApp({ providers: [new FakeProvider('fake', outcome)] });
+
+    const report = (
+      await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })
+    ).json<CheckReport>();
+    const section = report.sections['blacklist.gsma'];
+
+    expect(section?.outcome).toBe(arm);
+    if (reason !== undefined) expect(section?.reason).toBe(reason);
+    // `unavailable` and `inconclusive` still carry coverage and a checked_at, and `inconclusive`
+    // still carries a remedy.
+    expect(section?.coverage).toBeDefined();
+    if (arm === 'inconclusive') expect(section?.remedy).toBeDefined();
+
+    expect(report.billing.credits_charged).toBe(0);
+    expect('credits_remaining' in report.billing).toBe(false);
   });
 });

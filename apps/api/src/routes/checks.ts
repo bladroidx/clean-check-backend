@@ -159,25 +159,6 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
             return reply.code(200).send(existing.responseBody as CheckReport);
           }
 
-          const guard = await services.enumeration.observe({
-            tenantId: tenant.id,
-            tac: imei.typeAllocationCode,
-            imeiDigits: imei.digits,
-            now: new Date(),
-          });
-
-          if (guard.level === 'suspended') {
-            return reply.code(429).send({
-              error: {
-                code: 'account_restricted',
-                message:
-                  'Paid lookups are suspended on this account after an unusual volume of sequential ' +
-                  'IMEIs. Contact support.',
-                request_id: request.id,
-              },
-            });
-          }
-
           const report = await runCheck(
             {
               repos: services.repos,
@@ -194,7 +175,6 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
               capabilities: requested,
               maxAgeSeconds: request.body.max_age_seconds,
               idempotencyKey,
-              restriction: guard.level,
               signal: toSignal(request.raw),
             },
           );
@@ -204,8 +184,6 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
             statusCode: 200,
             responseBody: report,
           });
-
-          await services.enqueueCompletionWebhook(tenant.id, report);
 
           // 200 even when every section is unavailable. Invariant 7.
           return reply.code(200).send(report);
@@ -320,7 +298,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
           capabilities.push({
             capability,
             available: offline || derived || candidates.length > 0,
-            credits: offline || derived ? 0 : (candidates[0]?.service.credits ?? 0),
+            credits: 0,
             ...(candidates.length === 0 && !offline && !derived
               ? { reason: 'provider_no_coverage' as const }
               : {}),

@@ -1,8 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import type { Capability, CheckReport } from '@imei-check/contract';
+import type { Capability } from '@imei-check/contract';
 import { BreakerRegistry, Router, type Provider } from '@imei-check/providers';
 import { FieldCache } from '@imei-check/core';
-import { EnumerationGuard } from './abuse/enumeration.js';
 import {
   ConcurrencyGate,
   LIMITS,
@@ -30,13 +28,11 @@ export interface AppServices {
   /** Depth, where `limiter` is rate. See the comment on `MAX_CONCURRENT_PAID_CHECKS`. */
   readonly concurrency: ConcurrencyGate;
   readonly maxConcurrentChecks: number;
-  readonly enumeration: EnumerationGuard;
   readonly breakers: BreakerRegistry;
   /** `SERVER_PEPPER`. The internal hash key, never returned and never per-tenant. */
   readonly pepper: Buffer;
   readonly defaultCapabilities: readonly Capability[];
   readonly providers: readonly Provider[];
-  enqueueCompletionWebhook(tenantId: string, report: CheckReport): Promise<void>;
 }
 
 /**
@@ -117,32 +113,10 @@ export function buildServices(options: BuildServicesOptions): AppServices {
     limits: LIMITS,
     concurrency: new ConcurrencyGate(),
     maxConcurrentChecks: MAX_CONCURRENT_PAID_CHECKS,
-    enumeration: new EnumerationGuard(options.repos.abuse, undefined, (level) => {
-      metrics.abuseLadder.inc({ level });
-    }),
     breakers,
     pepper: options.pepper,
     defaultCapabilities: options.defaultCapabilities ?? DEFAULT_CAPABILITIES,
     providers: options.providers,
-
-    async enqueueCompletionWebhook(tenantId, report) {
-      const endpoints = await options.repos.webhooks.endpointsFor(tenantId, 'check.completed');
-      for (const endpoint of endpoints) {
-        await options.repos.webhooks.enqueue({
-          id: `whd_${randomUUID().replaceAll('-', '')}`,
-          endpointId: endpoint.id,
-          checkId: report.check_id,
-          event: 'check.completed',
-          // The full report, which already contains no raw IMEI -- only the masked form and the
-          // tenant-salted hash. Nothing extra is added here for exactly that reason.
-          payload: report,
-          status: 'pending',
-          attempts: 0,
-          nextRetryAt: undefined,
-          lastStatus: undefined,
-        });
-      }
-    },
   };
 
   return services;

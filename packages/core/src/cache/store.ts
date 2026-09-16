@@ -112,12 +112,3 @@ export class FieldCache {
     }
   }
 }
-
-/** Cached answers cost 20% of list. The global cache is where the margin comes from. */
-export const CACHE_HIT_PRICE_FACTOR = 0.2;
-
-export function cachedPrice(listCredits: number): number {
-  // Rounded UP so a 1-credit capability never becomes free by rounding -- a cache hit still costs
-  // us a database round trip, and a free tier that appears by accident is not a pricing decision.
-  return Math.max(1, Math.ceil(listCredits * CACHE_HIT_PRICE_FACTOR));
-}

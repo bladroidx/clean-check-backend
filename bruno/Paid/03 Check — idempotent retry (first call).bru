@@ -41,15 +41,20 @@ assert {
 }
 
 tests {
-  test("records what the first call actually charged", function () {
+  test("records the first call's check id", function () {
     bru.setVar("firstCheckId", res.getBody().check_id);
-    bru.setVar("balanceAfterFirstCall", res.getBody().billing.credits_remaining);
+  });
+
+  test("charges nothing — billing is off in single-consumer mode", function () {
+    expect(res.getBody().billing.credits_charged).to.equal(0);
+    expect(res.getBody().billing).to.not.have.property("credits_remaining");
   });
 }
 
 docs {
   Half of the idempotency test — see **04 Check — idempotent retry (replay)**, which sends the
-  exact same `Idempotency-Key` and asserts the check id and the charged balance are unchanged.
+  exact same `Idempotency-Key` and asserts the check id is unchanged and nothing was charged
+  either time.
 
   Split into two requests (rather than "send this one twice by hand") so `bru run` actually
   exercises the retry path in one pass: a single request whose test script only checks a saved

@@ -31,10 +31,7 @@ describe('metrics', () => {
     metrics.cacheHit.inc({ capability: 'blacklist.gsma', result: 'hit' });
     metrics.providerCall.inc({ provider_id: 'alpha', capability: 'blacklist.gsma', kind: 'answered' });
     metrics.providerLatency.observe({ provider_id: 'alpha', capability: 'blacklist.gsma' }, 0.5);
-    metrics.creditsCharged.inc({ reason: 'charged_list' }, 3);
     metrics.circuitState.set({ provider_id: 'alpha' }, 0);
-    metrics.abuseLadder.inc({ level: 'throttled' });
-    metrics.ledgerDrift.set({ tenant_id: 't1' }, 0);
 
     const rendered = await metrics.render();
     for (const name of [
@@ -42,10 +39,7 @@ describe('metrics', () => {
       'imei_cache_total',
       'imei_provider_call_total',
       'imei_provider_latency_seconds',
-      'imei_credits_charged_total',
       'imei_provider_circuit_open',
-      'imei_abuse_restriction_total',
-      'imei_ledger_drift_credits',
     ]) {
       expect(rendered, `${name} is missing`).toContain(name);
     }
