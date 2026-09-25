@@ -48,6 +48,27 @@ describe('dates', () => {
   });
 });
 
+describe('extractPairs with imei24 semicolon lines', () => {
+  it('splits Label;Value and keeps colons inside values', () => {
+    const pairs = extractPairs('Mark;Alcatel \nModel;Idol3-4.7\nProduction Date;2015-09-21\nPurchase Date: 2023-01-04 10:33');
+    expect(pairs).toEqual([
+      { label: 'Mark', value: 'Alcatel' },
+      { label: 'Model', value: 'Idol3-4.7' },
+      { label: 'Production Date', value: '2015-09-21' },
+      { label: 'Purchase Date', value: '2023-01-04 10:33' },
+    ]);
+  });
+
+  it('drops empty values and keeps literal null for the lexicon to treat as absent', () => {
+    expect(extractPairs('Model;\nWarranty Date;null')).toEqual([{ label: 'Warranty Date', value: 'null' }]);
+  });
+
+  it('scrubs an echoed IMEI line', () => {
+    const [pair] = extractPairs(`IMEI;${'8'.repeat(15)}`);
+    expect(pair?.value).toBe('[REDACTED-IMEI]');
+  });
+});
+
 describe('the parsing rule', () => {
   it('never produces a value for an unrecognised status', () => {
     const { values, misses } = normalise(

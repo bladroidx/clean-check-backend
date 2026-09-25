@@ -38,10 +38,11 @@ export function decodeEntities(input: string): string {
 }
 
 /**
- * Splits a blob into `Label: Value` pairs.
+ * Splits a blob into `Label: Value` or `Label;Value` pairs.
  *
- * Only the FIRST colon splits a line: `Purchase Date: 2023-01-04 10:33` must not lose its time.
- * A line with no colon is discarded rather than guessed at -- a heading is not a fact, and
+ * Only the FIRST colon or semicolon splits a line: `Purchase Date: 2023-01-04 10:33` must not lose its time.
+ * Earliest, not either: a line with both splits on the one that comes first.
+ * A line with neither is discarded rather than guessed at -- a heading is not a fact, and
  * inventing a label for it is how a stray word becomes a field value.
  */
 export function extractPairs(blob: string): ExtractedPair[] {
@@ -52,11 +53,15 @@ export function extractPairs(blob: string): ExtractedPair[] {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
 
+    // Earliest of ':' or ';'. DHRU sellers use "Label: Value"; imei24 uses "Label;Value".
+    // Earliest, not either: "Purchase Date: 2023-01-04 10:33" must not split on a later one.
     const colon = trimmed.indexOf(':');
-    if (colon <= 0 || colon === trimmed.length - 1) continue;
+    const semi = trimmed.indexOf(';');
+    const split = colon === -1 ? semi : semi === -1 ? colon : Math.min(colon, semi);
+    if (split <= 0 || split === trimmed.length - 1) continue;
 
-    const label = trimmed.slice(0, colon).trim();
-    const value = trimmed.slice(colon + 1).trim();
+    const label = trimmed.slice(0, split).trim();
+    const value = trimmed.slice(split + 1).trim();
     if (label.length === 0 || value.length === 0) continue;
 
     pairs.push({ label, value: scrub(value) });
