@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Capability } from '@imei-check/contract';
 import type { BreakerRegistry } from './breaker.js';
 import { coversDevice } from './catalogue.js';
-import type { CatalogueService, Provider, ProviderOutcome } from './types.js';
+import type { CatalogueService, FailureReason, Provider, ProviderOutcome } from './types.js';
 
 /**
  * One purchase to make: the capabilities it will answer, and the candidate services (this one plus
@@ -28,6 +28,9 @@ function specificity(service: CatalogueService): number {
 function ranked(a: { service: CatalogueService }, b: { service: CatalogueService }): number {
   return specificity(b.service) - specificity(a.service) || a.service.costUsd - b.service.costUsd;
 }
+
+/** Failure reasons produced by our own guards, not by the supplier. See `runCall`. */
+const OUR_OWN_REFUSALS: ReadonlySet<FailureReason> = new Set(['rate_limited', 'spend_cap_reached']);
 
 /**
  * `PlannedCall.capabilities` is never empty in practice -- `plan()` never emits one, and `run()`
@@ -244,8 +247,14 @@ export class Router {
       const outcome = await this.execute(candidate, { capability, imeiDigits: args.imeiDigits, signal: args.signal }, attemptId);
       const finishedAt = now();
 
-      if (outcome.kind === 'failed') breaker.recordFailure();
-      else breaker.recordSuccess();
+      // `rate_limited` (our own cross-process lock was busy) and `spend_cap_reached` (our own
+      // budget) are refusals WE made before any request left the building. Counting them against
+      // the supplier would open its circuit on a busy afternoon and then fail every check for the
+      // cool-down -- a self-inflicted outage blamed on someone else. They stay `failed` outcomes
+      // (no field, never a pass); they just say nothing about the supplier's health either way.
+      if (outcome.kind === 'failed') {
+        if (!OUR_OWN_REFUSALS.has(outcome.reason)) breaker.recordFailure();
+      } else breaker.recordSuccess();
 
       const attempt: Attempt = {
         attemptId,

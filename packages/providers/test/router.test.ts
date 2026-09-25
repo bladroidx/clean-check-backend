@@ -172,6 +172,23 @@ describe('failover', () => {
     expect(result.outcome).toEqual(CLEAN);
   });
 
+  it('does not count our own lock or spend-cap refusals against the supplier breaker', async () => {
+    for (const reason of ['rate_limited', 'spend_cap_reached'] as const) {
+      const breakers = new BreakerRegistry();
+      const refused = new FakeProvider('a', { kind: 'failed', reason, detail: 'ours' });
+      for (let i = 0; i < 10; i += 1) {
+        const result = await run([refused], breakers);
+        // Still a failure -- no field, never a pass -- just not the supplier's failure.
+        expect(result.outcome.kind).toBe('failed');
+      }
+      expect(breakers.get('a').isOpen()).toBe(false);
+    }
+    // Control: the same count of genuine supplier failures does open it.
+    const breakers = new BreakerRegistry();
+    for (let i = 0; i < 10; i += 1) await run([new FakeProvider('a', FAILED)], breakers);
+    expect(breakers.get('a').isOpen()).toBe(true);
+  });
+
   it('records provider_calls BEFORE the request is made', async () => {
     const order: string[] = [];
     const provider: Provider = {
