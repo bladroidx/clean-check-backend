@@ -10,3 +10,4 @@ export * from './cache/store.js';
 export * from './metrics.js';
 export * from './providers/build.js';
 export * from './providers/guarded.js';
+export * from './orders/settle.js';

@@ -73,6 +73,7 @@ async function seeded(overrides: Partial<Parameters<Repositories['orders']['inse
     capability: 'blacklist.gsma',
     referenceId: 'ref_1',
     orderReference: 'supplier_1',
+    imeiHash: 'h',
     status: 'pending',
     attempts: 0,
     nextPollAt: new Date('2026-09-13T00:00:00Z'),

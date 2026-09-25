@@ -63,7 +63,7 @@ describe('GuardedProvider', () => {
       dailySpendUsd: 10,
       costSince: async () => 999,
     });
-    const result = await p.poll('order-ref', service, AbortSignal.timeout(5000));
+    const result = await p.poll?.('order-ref', service, AbortSignal.timeout(5000));
     expect(result).toMatchObject({ kind: 'answered' });
     expect(inner.pollCalls).toBe(1);
   });
@@ -92,5 +92,12 @@ describe('GuardedProvider', () => {
     });
     expect(third).toEqual({ acquired: true, value: 'third' });
     expect(events).toEqual(['holder-start', 'holder-end', 'third-ran']);
+  });
+
+  it('leaves poll undefined when the inner provider has no poll, so a caller can still tell "cannot poll" apart from "poll fails"', async () => {
+    const repos = new MemoryRepositories();
+    const inner = new Slow(1); // Slow has no `poll` method
+    const p = new GuardedProvider(inner, { lock: repos.locks, lockWaitMs: 100, dailySpendUsd: 10, costSince: async () => 0 });
+    expect(p.poll).toBeUndefined();
   });
 });

@@ -446,24 +446,43 @@ class PgProviderLock implements ProviderLock {
   ): Promise<{ acquired: true; value: T } | { acquired: false }> {
     const client = await this.pool.connect();
     const deadline = Date.now() + waitMs;
+    // If `pg_advisory_unlock` itself throws, the session-level lock may still be held on this
+    // connection, and the pool must never hand that connection to another caller believing it is
+    // clean. `releaseErr` is passed to `client.release(err)` so the pool destroys the connection
+    // instead of returning it to the pool -- Postgres then frees the lock when the session ends.
+    let releaseErr: unknown;
     try {
       for (;;) {
         const { rows } = await client.query<{ ok: boolean }>(
           'SELECT pg_try_advisory_lock(hashtext($1)) AS ok',
           [name],
         );
-        const gotLock = rows[0]?.ok === true;
-        if (gotLock) break;
+        if (rows[0]?.ok === true) break;
         if (Date.now() >= deadline) return { acquired: false };
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
+
+      let result: { acquired: true; value: T };
       try {
-        return { acquired: true, value: await fn() };
-      } finally {
-        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [name]);
+        result = { acquired: true, value: await fn() };
+      } catch (fnError) {
+        // `fn` failed first. Still try to unlock, but a failure to unlock must not replace or
+        // mask the error the caller actually needs to see.
+        try {
+          await client.query('SELECT pg_advisory_unlock(hashtext($1))', [name]);
+        } catch (unlockError) {
+          releaseErr = unlockError;
+        }
+        throw fnError;
       }
+      try {
+        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [name]);
+      } catch (unlockError) {
+        releaseErr = unlockError;
+      }
+      return result;
     } finally {
-      client.release();
+      client.release(releaseErr as Error | undefined);
     }
   }
 }
@@ -579,6 +598,8 @@ function toOrder(row: Record<string, unknown>): OrderRow {
     capability: row['capability'] as Capability,
     referenceId: String(row['reference_id']),
     orderReference: (row['order_reference'] as string | null) ?? undefined,
+    // Task 9 adds the column; until then no row has one, so `?? ''` rather than a fabricated hash.
+    imeiHash: (row['imei_hash'] as string | null) ?? '',
     status: row['status'] as OrderRow['status'],
     attempts: Number(row['attempts'] ?? 0),
     nextPollAt: (row['next_poll_at'] as Date | null) ?? undefined,

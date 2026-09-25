@@ -27,11 +27,39 @@ export interface GuardOptions {
 export class GuardedProvider implements Provider {
   readonly id: string;
 
+  // `poll` and `health` are assigned conditionally in the constructor, not declared as methods
+  // that delegate-or-fail. A caller checks `provider.poll === undefined` to mean "this provider
+  // cannot poll at all" (Task 3's router does this). If this class always defined `poll`, wrapping
+  // a poll-less provider would turn that into "poll always fails" -- a different, worse thing than
+  // "cannot poll" -- and the router would keep a dead candidate in its list instead of skipping it.
+  readonly poll?: (
+    orderReference: string,
+    service: CatalogueService,
+    signal: AbortSignal,
+  ) => Promise<ProviderOutcome>;
+  readonly health?: (signal: AbortSignal) => Promise<{ balanceUsd?: number; reachable: boolean }>;
+
   constructor(
     private readonly inner: Provider,
     private readonly options: GuardOptions,
   ) {
     this.id = inner.id;
+
+    const innerPoll = inner.poll;
+    if (innerPoll !== undefined) {
+      this.poll = (orderReference, service, signal) =>
+        this.locked(() => innerPoll.call(inner, orderReference, service, signal));
+    }
+
+    const innerHealth = inner.health;
+    if (innerHealth !== undefined) {
+      this.health = async (signal) => {
+        const result = await this.options.lock.withLock(`provider:${this.id}`, this.options.lockWaitMs, () =>
+          innerHealth.call(inner, signal),
+        );
+        return result.acquired ? result.value : { reachable: true };
+      };
+    }
   }
 
   catalogue(): readonly CatalogueService[] {
@@ -52,23 +80,6 @@ export class GuardedProvider implements Provider {
       return { kind: 'failed', reason: 'spend_cap_reached', detail: 'daily supplier spend cap reached' };
     }
     return this.locked(() => this.inner.execute(request));
-  }
-
-  async poll(orderReference: string, service: CatalogueService, signal: AbortSignal): Promise<ProviderOutcome> {
-    const innerPoll = this.inner.poll;
-    if (innerPoll === undefined) {
-      return { kind: 'failed', reason: 'transport_error', detail: 'provider cannot poll' };
-    }
-    return this.locked(() => innerPoll.call(this.inner, orderReference, service, signal));
-  }
-
-  async health(signal: AbortSignal): Promise<{ balanceUsd?: number; reachable: boolean }> {
-    const innerHealth = this.inner.health;
-    if (innerHealth === undefined) return { reachable: false };
-    const result = await this.options.lock.withLock(`provider:${this.id}`, this.options.lockWaitMs, () =>
-      innerHealth.call(this.inner, signal),
-    );
-    return result.acquired ? result.value : { reachable: true };
   }
 
   private async locked(fn: () => Promise<ProviderOutcome>): Promise<ProviderOutcome> {

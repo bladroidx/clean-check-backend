@@ -223,6 +223,7 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
         capability,
         referenceId: attempt?.attemptId ?? randomUUID(),
         orderReference: routed.outcome.orderReference,
+        imeiHash: request.imeiHash,
         status: 'pending',
         attempts: 0,
         nextPollAt: new Date(startedAt.getTime() + 5 * 60 * 1000),

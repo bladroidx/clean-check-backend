@@ -112,7 +112,7 @@ describe('orders', () => {
     const now = new Date();
     await r.orders.insert({
       id: 'o1', checkId: 'c1', tenantId: 't1', providerId: 'beta', serviceId: 'gsx',
-      capability: 'blacklist.gsma', referenceId: 'ref1', orderReference: 'sup1',
+      capability: 'blacklist.gsma', referenceId: 'ref1', orderReference: 'sup1', imeiHash: 'h1',
       status: 'pending', attempts: 0, nextPollAt: now,
       expiresAt: new Date(now.getTime() + 3600_000), createdAt: now, settledAt: undefined,
     });
