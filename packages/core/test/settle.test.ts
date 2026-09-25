@@ -6,6 +6,7 @@ import { generateTenantSalt } from '../src/db/tenant-salt.js';
 import type { OrderRow, Repositories } from '../src/db/types.js';
 import { Metrics } from '../src/metrics.js';
 import { backoffFor, pollDueOrders, pollOrders } from '../src/orders/settle.js';
+import { coverageFor } from '../src/report/coverage.js';
 
 const s486: CatalogueService = {
   serviceId: '486',
@@ -215,6 +216,110 @@ describe('pollDueOrders / pollOrders (shared order settlement)', () => {
     expect(polled).toBe(false);
     const sections = await repos.checks.sections('chk_1');
     expect(sections[0]?.outcome).toBe('unavailable');
+  });
+
+  it('advanceBackoff: false (the API wait window) leaves attempts and nextPollAt untouched', async () => {
+    const repos = new MemoryRepositories();
+    const row = order();
+    await seed(repos, row);
+    for (const outcome of [{ kind: 'pending', orderReference: 'o' }, { kind: 'failed', reason: 'timeout' }] as const) {
+      const provider: Provider = {
+        id: 'imei24',
+        catalogue: () => [s486],
+        supports: () => s486,
+        execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+        poll: async () => outcome,
+      };
+      const summary = await pollOrders(
+        { repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now },
+        [row],
+        { advanceBackoff: false },
+      );
+      expect(summary.stillPending).toBe(1);
+      const after = await repos.orders.byReference('ref_1');
+      expect(after?.attempts).toBe(0);
+      expect(after?.nextPollAt).toEqual(row.nextPollAt);
+    }
+    // The worker's default still advances it.
+    const provider: Provider = {
+      id: 'imei24',
+      catalogue: () => [s486],
+      supports: () => s486,
+      execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+      poll: async () => ({ kind: 'pending', orderReference: 'o' }) as const,
+    };
+    await pollOrders({ repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now }, [row]);
+    expect((await repos.orders.byReference('ref_1'))?.attempts).toBe(1);
+  });
+
+  it('stops before polling once the signal has aborted', async () => {
+    const repos = new MemoryRepositories();
+    await seed(repos, order());
+    let polled = 0;
+    const provider: Provider = {
+      id: 'imei24',
+      catalogue: () => [s486],
+      supports: () => s486,
+      execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+      poll: async () => {
+        polled += 1;
+        return { kind: 'pending', orderReference: 'o' } as const;
+      },
+    };
+    const summary = await pollOrders(
+      { repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now },
+      [order()],
+      { signal: AbortSignal.abort() },
+    );
+    expect(polled).toBe(0);
+    expect(summary.stillPending).toBe(1);
+  });
+
+  it('polls a multi-capability order ONCE and caches each field under its own capability coverage', async () => {
+    const s690multi: CatalogueService = {
+      ...s486,
+      serviceId: '690',
+      capabilities: ['blacklist.gsma', 'lock.carrier'],
+      fields: ['blacklist.status', 'lock.carrier.status'],
+    };
+    const repos = new MemoryRepositories();
+    const blacklistRow = order({ serviceId: '690' });
+    const carrierRow = order({ id: 'ord_2', referenceId: 'ref_2', serviceId: '690', capability: 'lock.carrier' });
+    await seed(repos, blacklistRow);
+    await repos.orders.insert(carrierRow);
+    let polls = 0;
+    const provider: Provider = {
+      id: 'imei24',
+      catalogue: () => [s690multi],
+      supports: () => s690multi,
+      execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+      poll: async () => {
+        polls += 1;
+        return {
+          kind: 'answered',
+          fields: [
+            { field: 'blacklist.status', value: 'clean' },
+            { field: 'lock.carrier.status', value: 'unlocked' },
+          ],
+          misses: [],
+        } as const;
+      },
+    };
+
+    // Carrier row first: with one write per row under the row's capability, the LAST row's
+    // coverage would win for every field.
+    const summary = await pollOrders(
+      { repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now },
+      [carrierRow, blacklistRow],
+    );
+
+    expect(polls).toBe(1);
+    expect(summary.answered).toBe(2);
+    expect((await repos.cache.get('hash_1:blacklist.status'))?.coverage).toEqual(coverageFor('blacklist.gsma', emptyTac));
+    expect((await repos.cache.get('hash_1:lock.carrier.status'))?.coverage).toEqual(coverageFor('lock.carrier', emptyTac));
+    const sections = await repos.checks.sections('chk_1');
+    expect(sections.map((x) => x.capability).sort()).toEqual(['blacklist.gsma', 'lock.carrier']);
+    expect((await repos.checks.byId('t1', 'chk_1'))?.status).toBe('complete');
   });
 
   it('backs off exponentially with a cap', () => {

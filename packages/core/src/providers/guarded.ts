@@ -52,7 +52,7 @@ export class GuardedProvider implements Provider {
     const innerPoll = inner.poll;
     if (innerPoll !== undefined) {
       this.poll = (orderReference, service, signal) =>
-        this.locked(() => innerPoll.call(inner, orderReference, service, signal));
+        this.locked(() => innerPoll.call(inner, orderReference, service, signal), signal);
     }
 
     const innerParse = inner.parseWebhook;
@@ -88,13 +88,63 @@ export class GuardedProvider implements Provider {
     if (spent > this.options.dailySpendUsd) {
       return { kind: 'failed', reason: 'spend_cap_reached', detail: 'daily supplier spend cap reached' };
     }
-    return this.locked(() => this.inner.execute(request));
+    return this.locked(() => this.inner.execute(request), request.signal);
   }
 
-  private async locked(fn: () => Promise<ProviderOutcome>): Promise<ProviderOutcome> {
-    const result = await this.options.lock.withLock(`provider:${this.id}`, this.options.lockWaitMs, fn);
+  /**
+   * Holds the lock for one call. The caller's `signal` bounds the WAIT as well as the call: a
+   * deep check whose budget runs out while the worker holds the lock returns at once rather than
+   * sitting out `lockWaitMs`. If the lock is granted later anyway, `fn` is skipped -- an order
+   * placed after the caller gave up is money spent on an answer nobody will receive.
+   */
+  private async locked(fn: () => Promise<ProviderOutcome>, signal?: AbortSignal): Promise<ProviderOutcome> {
+    if (signal?.aborted === true) return BUDGET_SPENT;
+    const state = { started: false };
+    const attempt = this.options.lock.withLock(`provider:${this.id}`, this.options.lockWaitMs, () => {
+      if (signal?.aborted === true) return Promise.resolve(BUDGET_SPENT);
+      state.started = true;
+      return fn();
+    });
+    const result = signal === undefined ? await attempt : await raceAbort(attempt, signal, state);
     return result.acquired
       ? result.value
       : { kind: 'failed', reason: 'rate_limited', detail: 'supplier is busy with another job' };
   }
+}
+
+const BUDGET_SPENT: ProviderOutcome = {
+  kind: 'failed',
+  reason: 'timeout',
+  detail: 'The time budget was spent before the supplier was free.',
+};
+
+type LockResult = { readonly acquired: true; readonly value: ProviderOutcome } | { readonly acquired: false };
+
+/**
+ * Resolves with the lock result, or with `BUDGET_SPENT` if `signal` aborts while still WAITING
+ * for the lock. Once the call has started it is never abandoned here: the supplier call gets the
+ * same signal and returns promptly itself, and walking away from a call that may already have
+ * placed an order would lose the order reference we paid for.
+ */
+function raceAbort(
+  attempt: Promise<LockResult>,
+  signal: AbortSignal,
+  state: { readonly started: boolean },
+): Promise<LockResult> {
+  return new Promise<LockResult>((resolve, reject) => {
+    const onAbort = () => {
+      if (!state.started) resolve({ acquired: true, value: BUDGET_SPENT });
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    attempt.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
 }

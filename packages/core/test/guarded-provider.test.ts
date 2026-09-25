@@ -39,6 +39,27 @@ describe('GuardedProvider', () => {
     expect([a, b].find((o) => o.kind === 'failed')).toMatchObject({ reason: 'rate_limited' });
   });
 
+  it('the caller signal bounds the lock WAIT, and an order is never placed after it aborted', async () => {
+    const repos = new MemoryRepositories();
+    const inner = new Slow(1);
+    const p = new GuardedProvider(inner, { lock: repos.locks, lockWaitMs: 5_000, dailySpendUsd: 10, costSince: async () => 0 });
+    let release: () => void = () => {};
+    // Another process (the worker) holds the lock for longer than our budget.
+    const holder = repos.locks.withLock('provider:imei24', 1_000, () => new Promise<void>((r) => { release = r; }));
+    await new Promise((r) => setTimeout(r, 5));
+
+    const started = Date.now();
+    const outcome = await p.execute(req(AbortSignal.timeout(50)));
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(outcome).toMatchObject({ kind: 'failed', reason: 'timeout' });
+
+    // The lock frees up later: the abandoned waiter must not run the call.
+    release();
+    await holder;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(inner.calls).toBe(0);
+  });
+
   it('refuses new orders once today spend exceeds the cap, and never calls the supplier', async () => {
     const repos = new MemoryRepositories();
     const inner = new Slow(1);

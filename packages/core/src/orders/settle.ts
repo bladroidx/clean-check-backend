@@ -1,6 +1,6 @@
-import { deriveVerdict } from '@imei-check/contract';
+import { deriveVerdict, type Capability } from '@imei-check/contract';
 import type { TacDirectory } from '@imei-check/identity';
-import type { Provider } from '@imei-check/providers';
+import { capabilityOf, type FieldValue, type Provider } from '@imei-check/providers';
 import { FieldCache } from '../cache/store.js';
 import type { OrderRow, Repositories } from '../db/types.js';
 import type { Metrics } from '../metrics.js';
@@ -45,103 +45,156 @@ export interface PollSummary {
   readonly stillPending: number;
 }
 
-/** Settles exactly the given orders -- the API's wait window calls this with the orders it just placed. */
-export async function pollOrders(deps: SettleDeps, orders: readonly OrderRow[]): Promise<PollSummary> {
+export interface PollOptions {
+  /**
+   * The caller's budget. The API's wait window passes its deep-check budget here, so a slow
+   * supplier or a busy lock cannot hold the request past it; a pass stops as soon as it aborts.
+   */
+  readonly signal?: AbortSignal;
+  /**
+   * Whether a still-pending (or transport-failed) poll pushes `attempts`/`nextPollAt` along the
+   * backoff. The worker's schedule: true. The API's wait window polls every second for ten
+   * seconds, and letting those polls advance the shared backoff would push the worker's next poll
+   * out by an hour -- so it passes false and leaves the schedule exactly as it found it.
+   */
+  readonly advanceBackoff?: boolean;
+}
+
+/**
+ * Settles exactly the given orders -- the API's wait window calls this with the orders it just placed.
+ *
+ * One supplier order can back several rows: one per capability it answers, plus a row per other
+ * check that attached to it. Each distinct `(providerId, orderReference)` is polled ONCE per pass
+ * and the outcome is applied to every row sharing it -- polling it N times would take the
+ * supplier's one-job lock N times for the same answer.
+ */
+export async function pollOrders(
+  deps: SettleDeps,
+  orders: readonly OrderRow[],
+  options: PollOptions = {},
+): Promise<PollSummary> {
   const now = deps.now ?? (() => new Date());
   const at = now();
+  const advanceBackoff = options.advanceBackoff ?? true;
 
   let answered = 0;
   let abandoned = 0;
   let stillPending = 0;
 
+  const groups = new Map<string, OrderRow[]>();
   for (const order of orders) {
     if (order.expiresAt <= at) {
       await abandon(deps, order, at);
       abandoned += 1;
       continue;
     }
+    // No supplier reference means nothing to poll: a group of its own, abandoned below.
+    const key =
+      order.orderReference === undefined
+        ? `row\u0000${order.id}`
+        : `ref\u0000${order.providerId}\u0000${order.orderReference}`;
+    groups.set(key, [...(groups.get(key) ?? []), order]);
+  }
 
-    const provider = deps.providers.find((p) => p.id === order.providerId);
+  for (const rows of groups.values()) {
+    const head = rows[0];
+    if (head === undefined) continue;
+
+    if (options.signal?.aborted === true) {
+      // Out of budget: leave the rest exactly as they are for the worker.
+      stillPending += rows.length;
+      continue;
+    }
+
+    const provider = deps.providers.find((p) => p.id === head.providerId);
     // The lexicon a poll must use lives on the SERVICE that placed the order, not on whichever
     // service the provider happens to register first, so the order's own `serviceId` decides it.
     // If the service has since dropped out of the catalogue, or the provider cannot poll at all,
     // or there is no supplier-side reference to poll, the order cannot be settled: abandon it
     // rather than guessing which lexicon applies.
-    const service = provider?.catalogue().find((s) => s.serviceId === order.serviceId);
-    if (provider?.poll === undefined || service === undefined || order.orderReference === undefined) {
-      await abandon(deps, order, at);
-      abandoned += 1;
+    const service = provider?.catalogue().find((s) => s.serviceId === head.serviceId);
+    if (provider?.poll === undefined || service === undefined || head.orderReference === undefined) {
+      for (const order of rows) await abandon(deps, order, at);
+      abandoned += rows.length;
       continue;
     }
 
-    const outcome = await provider.poll(order.orderReference, service, AbortSignal.timeout(30_000));
+    const timeout = AbortSignal.timeout(30_000);
+    const signal = options.signal !== undefined ? AbortSignal.any([options.signal, timeout]) : timeout;
+    const outcome = await provider.poll(head.orderReference, service, signal);
 
-    if (outcome.kind === 'pending') {
-      const attempts = order.attempts + 1;
-      await deps.repos.orders.update(order.id, {
-        attempts,
-        nextPollAt: new Date(at.getTime() + backoffFor(attempts)),
-      });
-      stillPending += 1;
-      continue;
-    }
-
-    if (outcome.kind === 'failed') {
+    if (outcome.kind === 'pending' || outcome.kind === 'failed') {
       // A transport failure is not an answer. Retry with backoff rather than settling the section
       // as unavailable -- the order is still open at the supplier and still paid for.
-      const attempts = order.attempts + 1;
-      await deps.repos.orders.update(order.id, {
-        attempts,
-        nextPollAt: new Date(at.getTime() + backoffFor(attempts)),
-      });
-      stillPending += 1;
+      if (advanceBackoff) {
+        for (const order of rows) {
+          const attempts = order.attempts + 1;
+          await deps.repos.orders.update(order.id, {
+            attempts,
+            nextPollAt: new Date(at.getTime() + backoffFor(attempts)),
+          });
+        }
+      }
+      stillPending += rows.length;
       continue;
     }
 
-    const section = assembleSection({
-      capability: order.capability,
-      outcome,
-      coverage: coverageFor(order.capability, deps.tacDirectory),
-      checkedAt: at,
-      onLexiconMiss: (miss) => {
-        deps.metrics.lexiconMiss.inc({ capability: miss.capability, service_id: miss.serviceId });
-      },
-    });
-
-    await deps.repos.checks.putSection({
-      checkId: order.checkId,
-      capability: order.capability,
-      outcome: section.outcome,
-      section,
-    });
-    deps.metrics.sectionOutcome.inc({
-      capability: order.capability,
-      outcome: section.outcome,
-      reason: section.reason ?? 'none',
-    });
-
-    // The synchronous path caches whatever it learned even from a section that did not pass; the
-    // async path never did, which meant a repeat check re-bought an answer we already had. Same
-    // write here, keyed on the check's own internal cache-key hash. A pre-Task-9 row has no stored
-    // hash (`imeiHash === ''`): writing under an empty key would make every such order share one
-    // cache row, so those orders settle their section normally but skip the cache write.
-    if (outcome.kind === 'answered' && order.imeiHash !== '') {
-      await new FieldCache(deps.repos.cache).write({
-        imeiHash: order.imeiHash,
-        fields: outcome.fields,
-        coverage: coverageFor(order.capability, deps.tacDirectory),
-        providerId: order.providerId,
-        checkedAt: at,
-      });
+    // The synchronous path caches whatever it learned even from a section that did not pass; so
+    // does this one, ONCE per supplier order, each field under its own capability's coverage --
+    // one write per row under the row's capability would let the last row's coverage win for
+    // every field. Keyed on the internal cache-key hash; a pre-Task-9 row has no stored hash
+    // (`imeiHash === ''`), and writing under an empty key would make every such order share one
+    // cache row, so those skip the cache write and settle their sections normally.
+    const imeiHash = rows.find((r) => r.imeiHash !== '')?.imeiHash;
+    if (outcome.kind === 'answered' && imeiHash !== undefined) {
+      const byCapability = new Map<Capability, FieldValue[]>();
+      for (const field of outcome.fields) {
+        const owner = capabilityOf(field.field);
+        byCapability.set(owner, [...(byCapability.get(owner) ?? []), field]);
+      }
+      const cache = new FieldCache(deps.repos.cache);
+      for (const [owner, fields] of byCapability) {
+        await cache.write({
+          imeiHash,
+          fields,
+          coverage: coverageFor(owner, deps.tacDirectory),
+          providerId: head.providerId,
+          checkedAt: at,
+        });
+      }
     }
 
-    await deps.repos.orders.update(order.id, {
-      status: outcome.kind === 'answered' ? 'answered' : 'rejected',
-      settledAt: at,
-    });
+    for (const order of rows) {
+      const section = assembleSection({
+        capability: order.capability,
+        outcome,
+        coverage: coverageFor(order.capability, deps.tacDirectory),
+        checkedAt: at,
+        onLexiconMiss: (miss) => {
+          deps.metrics.lexiconMiss.inc({ capability: miss.capability, service_id: miss.serviceId });
+        },
+      });
 
-    await completeIfDone(deps, order, at);
-    answered += 1;
+      await deps.repos.checks.putSection({
+        checkId: order.checkId,
+        capability: order.capability,
+        outcome: section.outcome,
+        section,
+      });
+      deps.metrics.sectionOutcome.inc({
+        capability: order.capability,
+        outcome: section.outcome,
+        reason: section.reason ?? 'none',
+      });
+
+      await deps.repos.orders.update(order.id, {
+        status: outcome.kind === 'answered' ? 'answered' : 'rejected',
+        settledAt: at,
+      });
+
+      await completeIfDone(deps, order, at);
+      answered += 1;
+    }
   }
 
   return { polled: orders.length, answered, abandoned, stillPending };
