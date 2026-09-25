@@ -607,11 +607,12 @@ class PgOrderRepo implements OrderRepo {
     );
     return rows.map(toOrder);
   }
-  async openForImei(imeiHash: string, serviceId: string): Promise<OrderRow | undefined> {
+  async openForImei(imeiHash: string, serviceId: string, now: Date): Promise<OrderRow | undefined> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
       `SELECT * FROM provider_orders WHERE imei_hash = $1 AND service_id = $2 AND status = 'pending'
+         AND expires_at > $3
        ORDER BY created_at DESC LIMIT 1`,
-      [imeiHash, serviceId],
+      [imeiHash, serviceId, now],
     );
     return rows[0] === undefined ? undefined : toOrder(rows[0]);
   }

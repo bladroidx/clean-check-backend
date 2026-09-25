@@ -232,9 +232,12 @@ class MemoryOrderRepo implements OrderRepo {
   async openForCheck(checkId: string): Promise<readonly OrderRow[]> {
     return [...this.rows.values()].filter((r) => r.checkId === checkId && r.status === 'pending');
   }
-  async openForImei(imeiHash: string, serviceId: string): Promise<OrderRow | undefined> {
+  async openForImei(imeiHash: string, serviceId: string, now: Date): Promise<OrderRow | undefined> {
     return [...this.rows.values()]
-      .filter((r) => r.imeiHash === imeiHash && r.serviceId === serviceId && r.status === 'pending')
+      .filter(
+        (r) =>
+          r.imeiHash === imeiHash && r.serviceId === serviceId && r.status === 'pending' && r.expiresAt > now,
+      )
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
   }
 }

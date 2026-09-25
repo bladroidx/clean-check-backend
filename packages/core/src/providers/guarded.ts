@@ -93,7 +93,36 @@ export class GuardedProvider implements Provider {
         notSent: true,
       };
     }
-    return this.locked(() => this.inner.execute(request), request.signal);
+    const hooks = request.inLock;
+    if (hooks === undefined) return this.locked(() => this.inner.execute(request), request.signal);
+    return this.locked(async () => {
+      // Final review F2 / R17: the caller's attach-or-cache check ran BEFORE this lock, so another
+      // check for the same device may have bought the answer while we queued. Ask again now that
+      // nobody else can be mid-purchase.
+      let deduped: ProviderOutcome | undefined;
+      try {
+        deduped = await hooks.beforeSend();
+      } catch {
+        // Cannot tell whether it is already bought: do not buy it (possibly) twice.
+        return {
+          kind: 'failed',
+          reason: 'transport_error',
+          detail: 'could not check for an order already in flight',
+          notSent: true,
+        };
+      }
+      if (deduped !== undefined) return deduped;
+
+      const outcome = await this.inner.execute(request);
+      try {
+        // Persist BEFORE the lock is released, so the next holder's re-check sees it.
+        await hooks.afterSend(outcome);
+      } catch {
+        // The purchase happened; losing it here would lose the order reference we paid for. The
+        // caller persists again after the call when this did not complete.
+      }
+      return outcome;
+    }, request.signal);
   }
 
   /**

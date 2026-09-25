@@ -142,6 +142,24 @@ export interface ExecuteRequest {
   readonly feedbackUrl?: string;
   /** Our own id for this attempt, echoed to the supplier so a webhook can be matched back. */
   readonly referenceId: string;
+  /**
+   * Dedupe hooks for a wrapper that serialises calls to this supplier (`GuardedProvider` in core)
+   * to run WHILE HOLDING that lock. A plain adapter ignores them.
+   *
+   * The caller's "is an order already open / is it cached?" check runs before the lock is taken,
+   * so two checks for the same device arriving together both pass it and both buy (final review
+   * F2). Re-checking under the lock, and persisting what was bought before releasing it, closes
+   * that window: the second caller cannot hold the lock until the first one's order row or cache
+   * row exists.
+   */
+  readonly inLock?: InLockHooks;
+}
+
+export interface InLockHooks {
+  /** Just before sending. An outcome returned here is used INSTEAD of sending anything. */
+  beforeSend(): Promise<ProviderOutcome | undefined>;
+  /** Just after the supplier answered, still under the lock: persist what was bought. */
+  afterSend(outcome: ProviderOutcome): Promise<void>;
 }
 
 export interface WebhookInput {

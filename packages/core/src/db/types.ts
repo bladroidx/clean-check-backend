@@ -188,10 +188,12 @@ export interface OrderRepo {
   update(id: string, patch: Partial<OrderRow>): Promise<void>;
   openForCheck(checkId: string): Promise<readonly OrderRow[]>;
   /**
-   * The most recent pending order for this IMEI and service -- so a second check for the same
-   * device can attach to a job already running instead of buying it twice.
+   * The most recent pending, UNEXPIRED order for this IMEI and service -- so a second check for
+   * the same device can attach to a job already running instead of buying it twice. An expired
+   * order the worker has not abandoned yet is excluded: attaching to it would hand the new check
+   * an order that is about to be given up on.
    */
-  openForImei(imeiHash: string, serviceId: string): Promise<OrderRow | undefined>;
+  openForImei(imeiHash: string, serviceId: string, now: Date): Promise<OrderRow | undefined>;
 }
 
 export interface IdempotencyRecord {

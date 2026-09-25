@@ -137,3 +137,49 @@ describe('GuardedProvider', () => {
     });
   });
 });
+
+describe('GuardedProvider in-lock dedupe hooks (R17)', () => {
+  const opts = (repos: MemoryRepositories) => ({ lock: repos.locks, lockWaitMs: 1_000, dailySpendUsd: 10, costSince: async () => 0 });
+
+  it('runs beforeSend and afterSend while HOLDING the lock, around the supplier call', async () => {
+    const repos = new MemoryRepositories();
+    const inner = new Slow(1);
+    const p = new GuardedProvider(inner, opts(repos));
+    const events: string[] = [];
+    const lockFree = async () =>
+      (await repos.locks.withLock('provider:imei24', 0, async () => undefined)).acquired;
+    await p.execute({
+      ...req(),
+      inLock: {
+        beforeSend: async () => { events.push(`before:${await lockFree() ? 'unlocked' : 'locked'}`); return undefined; },
+        afterSend: async () => { events.push(`after:${await lockFree() ? 'unlocked' : 'locked'}:${inner.calls}`); },
+      },
+    });
+    expect(events).toEqual(['before:locked', 'after:locked:1']);
+  });
+
+  it('an outcome from beforeSend is returned INSTEAD of calling the supplier', async () => {
+    const repos = new MemoryRepositories();
+    const inner = new Slow(1);
+    const p = new GuardedProvider(inner, opts(repos));
+    const joined: ProviderOutcome = { kind: 'pending', orderReference: 'already-open', providerCostUsd: 0 };
+    let after = 0;
+    const outcome = await p.execute({ ...req(), inLock: { beforeSend: async () => joined, afterSend: async () => { after += 1; } } });
+    expect(outcome).toBe(joined);
+    expect(inner.calls).toBe(0);
+    expect(after).toBe(0);
+  });
+
+  it('a failing re-check buys nothing; a failing persist still returns what was bought', async () => {
+    const repos = new MemoryRepositories();
+    const inner = new Slow(1);
+    const p = new GuardedProvider(inner, opts(repos));
+    const refused = await p.execute({ ...req(), inLock: { beforeSend: async () => { throw new Error('db'); }, afterSend: async () => {} } });
+    expect(refused).toMatchObject({ kind: 'failed', notSent: true });
+    expect(inner.calls).toBe(0);
+
+    const bought = await p.execute({ ...req(), inLock: { beforeSend: async () => undefined, afterSend: async () => { throw new Error('db'); } } });
+    expect(bought).toMatchObject({ kind: 'answered' });
+    expect(inner.calls).toBe(1);
+  });
+});

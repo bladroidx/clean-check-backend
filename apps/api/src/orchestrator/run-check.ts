@@ -15,10 +15,13 @@ import {
   fieldsFor,
   type CallResult,
   type CanonicalField,
+  type CatalogueService,
   type FieldValue,
+  type InLockHooks,
+  type ProviderOutcome,
   type Router,
 } from '@imei-check/providers';
-import type { FieldCache } from '@imei-check/core';
+import type { FieldCache, OrderRow } from '@imei-check/core';
 import type { Metrics } from '@imei-check/core';
 import type { Repositories } from '@imei-check/core';
 import { assembleSection, deriveWarrantyStatus } from '@imei-check/core';
@@ -42,7 +45,9 @@ import type { ImeiCipher } from '@imei-check/core';
  * 2. **Fewest services.** The router plans one order per SERVICE, not per capability: imei24
  *    charges again for every repeat, and an Apple all-in-one answers four capabilities at once.
  * 3. **Attach before placing.** An order already running for this device and service is joined,
- *    not placed again -- for the same reason.
+ *    not placed again -- for the same reason. Checked once up front (cheap, no provider_calls
+ *    row) and again INSIDE the supplier lock just before sending, because two checks for the same
+ *    device arriving together both pass the first check (R17).
  *
  * There is no reserve/settle step: billing is permanently off in single-consumer mode. The report
  * honestly states `credits_charged: 0` because nothing was ever charged.
@@ -182,6 +187,7 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
       capabilities,
       checkId,
       startedAt,
+      now,
       record,
       resolvedFields,
     });
@@ -274,19 +280,20 @@ async function resolvePaid(args: {
   capabilities: readonly Capability[];
   checkId: string;
   startedAt: Date;
+  now: () => Date;
   record: (capability: Capability, section: SectionResult, cached?: boolean) => void;
   resolvedFields: Map<CanonicalField, FieldValue>;
 }): Promise<void> {
-  const { deps, router, request, checkId, startedAt, record, resolvedFields } = args;
+  const { deps, router, request, checkId, startedAt, now, record, resolvedFields } = args;
   const tac = request.imei.typeAllocationCode;
 
   const paid = args.capabilities.filter(
     (c) => !OFFLINE_CAPABILITIES.includes(c) && !DERIVED_CAPABILITIES.includes(c),
   );
 
-  // ---- 2. Read the cache first: a fresh hit places no order.
-  const cached = new Map<Capability, Awaited<ReturnType<FieldCache['read']>>>();
-  for (const capability of paid) {
+  type Hits = Awaited<ReturnType<FieldCache['read']>>;
+  /** A complete, fresh cache hit for one capability, or undefined. Shared with the in-lock re-check. */
+  const readCache = async (capability: Capability): Promise<Hits | undefined> => {
     const hits = await deps.cache.read({
       imeiHash: request.imeiHash,
       capability,
@@ -296,17 +303,25 @@ async function resolvePaid(args: {
     });
     // A partial hit is not a hit: a section whose deciding field is stale would carry a
     // `checked_at` that is true of half of it.
-    const complete = hits.length > 0 && hasDecidingField(capability, hits.map((h) => h.field));
-    if (complete) cached.set(capability, hits);
-    deps.metrics.cacheHit.inc({ capability, result: complete ? 'hit' : 'miss' });
-  }
+    return hits.length > 0 && hasDecidingField(capability, hits.map((h) => h.field)) ? hits : undefined;
+  };
 
-  for (const [capability, hits] of cached) {
+  const serveCached = (capability: Capability, hits: Hits): void => {
     record(capability, fromCache(capability, hits, deps, startedAt), true);
     for (const hit of hits) {
       resolvedFields.set(hit.field, { field: hit.field, value: hit.value, ...(hit.rawLabel !== undefined ? { rawLabel: hit.rawLabel } : {}) });
     }
+  };
+
+  // ---- 2. Read the cache first: a fresh hit places no order.
+  const cached = new Map<Capability, Hits>();
+  for (const capability of paid) {
+    const hits = await readCache(capability);
+    if (hits !== undefined) cached.set(capability, hits);
+    deps.metrics.cacheHit.inc({ capability, result: hits !== undefined ? 'hit' : 'miss' });
   }
+
+  for (const [capability, hits] of cached) serveCached(capability, hits);
 
   // ---- 3. Plan the fewest services that cover what is left.
   const toBuy = paid.filter((c) => !cached.has(c));
@@ -331,6 +346,72 @@ async function resolvePaid(args: {
     );
   }
 
+  const coverageOf = (capability: Capability) => coverageFor(capability, deps.tacDirectory);
+
+  /**
+   * Makes what one call bought durable: the field cache for an answer, one order row per
+   * capability for a pending order. Runs INSIDE the supplier lock when the provider is guarded
+   * (so a queued duplicate sees it on its re-check), and after the call otherwise.
+   */
+  const persist = async (
+    call: { capabilities: readonly Capability[] },
+    outcome: ProviderOutcome,
+    service: CatalogueService,
+    attemptId: string | undefined,
+    joined: OrderRow | undefined,
+  ): Promise<void> => {
+    // Cache whatever we actually learned, even from a section that did not pass. Once per CALL:
+    // each field is written once, under its own capability's coverage.
+    if (outcome.kind === 'answered') {
+      const byCapability = new Map<Capability, FieldValue[]>();
+      for (const field of outcome.fields) {
+        const owner = capabilityOf(field.field);
+        byCapability.set(owner, [...(byCapability.get(owner) ?? []), field]);
+      }
+      for (const [owner, fields] of byCapability) {
+        await deps.cache.write({
+          imeiHash: request.imeiHash,
+          fields,
+          coverage: coverageOf(owner),
+          providerId: service.providerId,
+          checkedAt: startedAt,
+        });
+      }
+    }
+
+    // Async order: one row PER capability, all carrying the same supplier reference, so the
+    // worker and the wait window settle every section this one order answers.
+    if (outcome.kind === 'pending') {
+      for (const [index, capability] of call.capabilities.entries()) {
+        await deps.repos.orders.insert({
+          id: `ord_${randomUUID()}`, // hyphens kept, as for the check id
+          checkId,
+          tenantId: request.tenantId,
+          providerId: service.providerId,
+          serviceId: service.serviceId,
+          capability,
+          // `reference_id` is UNIQUE. The first row keeps the attempt id the supplier was given
+          // (the webhook matches on it); the rest are suffixed. An attached order has no attempt.
+          referenceId:
+            attemptId !== undefined
+              ? index === 0
+                ? attemptId
+                : `${attemptId}:${capability}`
+              : randomUUID(),
+          orderReference: outcome.orderReference,
+          imeiHash: request.imeiHash,
+          status: 'pending',
+          attempts: 0,
+          nextPollAt: new Date(startedAt.getTime() + FIRST_POLL_MS),
+          // An attached order expires when the order it joined does -- it is the same job.
+          expiresAt: joined?.expiresAt ?? new Date(startedAt.getTime() + ORDER_TTL_MS),
+          createdAt: startedAt,
+          settledAt: undefined,
+        });
+      }
+    }
+  };
+
   // ---- 4. One order per call: attach to one already running, or place it.
   for (const call of calls) {
     const head = call.candidates[0];
@@ -338,7 +419,7 @@ async function resolvePaid(args: {
     // rather than bought again. No runCall, so no provider_calls row: nothing is being spent.
     const open =
       head !== undefined
-        ? await deps.repos.orders.openForImei(request.imeiHash, head.service.serviceId)
+        ? await deps.repos.orders.openForImei(request.imeiHash, head.service.serviceId, now())
         : undefined;
 
     const attach = head !== undefined && open !== undefined && open.orderReference !== undefined;
@@ -364,6 +445,40 @@ async function resolvePaid(args: {
       continue;
     }
 
+    // The check above ran before the supplier lock; a concurrent check for the same device may
+    // be buying this very answer while we queue for it. These hooks re-check under the lock and
+    // persist before it is released (R17). Each is remembered by identity, so what happens after
+    // the call can tell "the provider sent this" from "the re-check produced this".
+    let joined: OrderRow | undefined;
+    let fromCacheHits: Map<Capability, Hits> | undefined;
+    let dedupedOutcome: ProviderOutcome | undefined;
+    let persistedOutcome: ProviderOutcome | undefined;
+    const inLock = (service: CatalogueService, attemptId: string): InLockHooks => ({
+      beforeSend: async () => {
+        const again = await deps.repos.orders.openForImei(request.imeiHash, service.serviceId, now());
+        if (again?.orderReference !== undefined) {
+          joined = again;
+          dedupedOutcome = { kind: 'pending', orderReference: again.orderReference, providerCostUsd: 0 };
+          return dedupedOutcome;
+        }
+        const hits = new Map<Capability, Hits>();
+        for (const capability of call.capabilities) {
+          const found = await readCache(capability);
+          if (found !== undefined) hits.set(capability, found);
+        }
+        if (hits.size === call.capabilities.length) {
+          fromCacheHits = hits;
+          dedupedOutcome = { kind: 'answered', fields: [], misses: [], providerCostUsd: 0 };
+          return dedupedOutcome;
+        }
+        return undefined;
+      },
+      afterSend: async (outcome) => {
+        await persist(call, outcome, service, attemptId, undefined);
+        persistedOutcome = outcome;
+      },
+    });
+
     const routed: CallResult =
       attach && head !== undefined && open?.orderReference !== undefined
         ? {
@@ -373,35 +488,34 @@ async function resolvePaid(args: {
             service: head.service,
             outcome: { kind: 'pending', orderReference: open.orderReference },
           }
-        : await router.runCall({ call, imeiDigits: request.imei.digits, signal: request.signal });
+        : await router.runCall({ call, imeiDigits: request.imei.digits, signal: request.signal, inLock });
 
     recordAttemptMetrics(deps, routed);
 
-    const coverageOf = (capability: Capability) => coverageFor(capability, deps.tacDirectory);
+    // Served by the in-lock re-check from the cache another check just wrote: exactly as step 2
+    // would have served it, original `checked_at` included.
+    const cacheServed = fromCacheHits;
+    if (cacheServed !== undefined && routed.outcome === dedupedOutcome) {
+      for (const [capability, hits] of cacheServed) serveCached(capability, hits);
+      continue;
+    }
 
-    // Cache and remember whatever we actually learned, even from a section that did not pass.
-    // Once per CALL: each field is written once, under its own capability's coverage.
     if (routed.outcome.kind === 'answered') {
-      const byCapability = new Map<Capability, FieldValue[]>();
-      for (const field of routed.outcome.fields) {
-        resolvedFields.set(field.field, field);
-        const owner = capabilityOf(field.field);
-        byCapability.set(owner, [...(byCapability.get(owner) ?? []), field]);
-      }
-      const providerId = routed.attempts[routed.attempts.length - 1]?.providerId ?? 'unknown';
-      for (const [owner, fields] of byCapability) {
-        await deps.cache.write({
-          imeiHash: request.imeiHash,
-          fields,
-          coverage: coverageOf(owner),
-          providerId,
-          checkedAt: startedAt,
-        });
-      }
+      for (const field of routed.outcome.fields) resolvedFields.set(field.field, field);
     }
 
     const last = routed.attempts[routed.attempts.length - 1];
-    for (const [index, capability] of call.capabilities.entries()) {
+    if (routed.service !== undefined && routed.outcome !== persistedOutcome) {
+      await persist(
+        call,
+        routed.outcome,
+        routed.service,
+        last?.attemptId,
+        attach ? open : routed.outcome === dedupedOutcome ? joined : undefined,
+      );
+    }
+
+    for (const capability of call.capabilities) {
       record(
         capability,
         assembleSection({
@@ -414,36 +528,6 @@ async function resolvePaid(args: {
           },
         }),
       );
-
-      // Async order: one row PER capability, all carrying the same supplier reference, so the
-      // worker and the wait window settle every section this one order answers.
-      if (routed.outcome.kind === 'pending' && routed.service !== undefined) {
-        await deps.repos.orders.insert({
-          id: `ord_${randomUUID()}`, // hyphens kept, as for the check id
-          checkId,
-          tenantId: request.tenantId,
-          providerId: routed.service.providerId,
-          serviceId: routed.service.serviceId,
-          capability,
-          // `reference_id` is UNIQUE. The first row keeps the attempt id the supplier was given
-          // (the webhook matches on it); the rest are suffixed. An attached order has no attempt.
-          referenceId:
-            last !== undefined
-              ? index === 0
-                ? last.attemptId
-                : `${last.attemptId}:${capability}`
-              : randomUUID(),
-          orderReference: routed.outcome.orderReference,
-          imeiHash: request.imeiHash,
-          status: 'pending',
-          attempts: 0,
-          nextPollAt: new Date(startedAt.getTime() + FIRST_POLL_MS),
-          // An attached order expires when the order it joined does -- it is the same job.
-          expiresAt: open?.expiresAt ?? new Date(startedAt.getTime() + ORDER_TTL_MS),
-          createdAt: startedAt,
-          settledAt: undefined,
-        });
-      }
     }
   }
 }

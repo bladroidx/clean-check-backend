@@ -325,3 +325,53 @@ describe('the daily spend cap counts what may have been spent (R18)', () => {
     expect(provider.executed).toHaveLength(1);
   });
 });
+
+/**
+ * Final review F2 / ruling R17: the in-flight dedupe race.
+ *
+ * `openForImei` and the cache are read before the supplier's one-job lock is taken, so two deep
+ * checks for the same device arriving together both saw "nothing open, nothing cached", queued on
+ * the lock, and each placed its own order -- imei24 charges for every repeat. The re-check now runs
+ * inside the lock, immediately before sending, and whatever the first one bought is persisted
+ * before the lock is released.
+ */
+describe('concurrent deep checks for one IMEI (R17)', () => {
+  const spent = (h: Awaited<ReturnType<typeof makePaidApp>>) =>
+    [...(h.repos as MemoryRepositories).providerCalls.rows.values()].reduce((sum, r) => sum + r.providerCostUsd, 0);
+
+  it('two concurrent async checks place ONE order and both attach to it', async () => {
+    const provider = new SlowProvider('fake', { kind: 'pending', orderReference: 'race-1' }, [service({ providerId: 'fake', async: true })], 100);
+    provider.pollOutcomes = [{ kind: 'pending', orderReference: 'race-1' }];
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: 1_000, pollIntervalMs: 50 });
+
+    const [a, b] = (await Promise.all([
+      post(h, '/v1/deep_checks', { imei: SENTINEL }),
+      post(h, '/v1/deep_checks', { imei: SENTINEL }),
+    ])).map((r) => r.json<CheckReport>());
+
+    expect(provider.executed).toHaveLength(1);
+    expect(spent(h)).toBeCloseTo(0.1);
+    for (const report of [a, b]) {
+      expect(report?.sections['blacklist.gsma']).toMatchObject({ outcome: 'inconclusive', reason: 'awaiting_provider' });
+      const rows = await h.repos.orders.openForCheck(report!.check_id);
+      expect(rows.map((r) => r.orderReference)).toEqual(['race-1']);
+    }
+  });
+
+  it('two concurrent sync checks buy ONCE; the second is served from the cache the first wrote', async () => {
+    const provider = new SlowProvider('fake', CLEAN, [service({ providerId: 'fake' })], 100);
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: 1_000 });
+
+    const reports = (await Promise.all([
+      post(h, '/v1/deep_checks', { imei: SENTINEL }),
+      post(h, '/v1/deep_checks', { imei: SENTINEL }),
+    ])).map((r) => r.json<CheckReport>());
+
+    expect(provider.executed).toHaveLength(1);
+    expect(spent(h)).toBeCloseTo(0.1);
+    const sections = reports.map((r) => r.sections['blacklist.gsma']);
+    expect(sections.map((s) => s?.outcome)).toEqual(['pass', 'pass']);
+    // Exactly one of them is the cached answer, with the ORIGINAL checked_at (ADR-0004).
+    expect(sections.filter((s) => s?.freshness?.cached === true)).toHaveLength(1);
+  });
+});

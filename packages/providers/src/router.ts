@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Capability } from '@imei-check/contract';
 import type { BreakerRegistry } from './breaker.js';
 import { coversDevice } from './catalogue.js';
-import type { CatalogueService, FailureReason, Provider, ProviderOutcome } from './types.js';
+import type { CatalogueService, FailureReason, InLockHooks, Provider, ProviderOutcome } from './types.js';
 
 /**
  * One purchase to make: the capabilities it will answer, and the candidate services (this one plus
@@ -223,7 +223,17 @@ export class Router {
     return this.runCall({ call, imeiDigits: args.imeiDigits, signal: args.signal });
   }
 
-  async runCall(args: { call: PlannedCall; imeiDigits: string; signal: AbortSignal }): Promise<CallResult> {
+  /**
+   * `inLock`, when given, is asked for dedupe hooks per attempt -- the service being tried and the
+   * attempt id the supplier is sent -- and they are forwarded on the `ExecuteRequest` for a
+   * lock-holding provider to run. See `ExecuteRequest.inLock`.
+   */
+  async runCall(args: {
+    call: PlannedCall;
+    imeiDigits: string;
+    signal: AbortSignal;
+    inLock?: (service: CatalogueService, attemptId: string) => InLockHooks;
+  }): Promise<CallResult> {
     const now = this.options.now ?? (() => new Date());
     const candidates = args.call.candidates;
     // A `PlannedCall` always names at least one capability; this only guards the type.
@@ -287,7 +297,16 @@ export class Router {
         costUsd: candidate.service.costUsd,
       });
 
-      const outcome = await this.execute(candidate, { capability, imeiDigits: args.imeiDigits, signal: args.signal }, attemptId);
+      const outcome = await this.execute(
+        candidate,
+        {
+          capability,
+          imeiDigits: args.imeiDigits,
+          signal: args.signal,
+          ...(args.inLock !== undefined ? { inLock: args.inLock(candidate.service, attemptId) } : {}),
+        },
+        attemptId,
+      );
       const finishedAt = now();
 
       // Three kinds of `failed` say nothing about the supplier's health, so they never count
@@ -321,7 +340,17 @@ export class Router {
         // What it cost US, which is not the same question: a failure keeps its price unless it
         // provably never left (R18) -- otherwise the spend cap undercounts exactly when the
         // supplier is timing out on orders it has already debited.
-        costUsd: outcome.kind === 'failed' && neverSent(outcome) ? 0 : candidate.service.costUsd,
+        //
+        // An answer or order may carry its own price: 0 when a lock-holding wrapper found the
+        // order already open, or the answer already cached, and sent nothing (R17).
+        costUsd:
+          outcome.kind === 'failed'
+            ? neverSent(outcome)
+              ? 0
+              : candidate.service.costUsd
+            : outcome.kind === 'rejected'
+              ? candidate.service.costUsd
+              : (outcome.providerCostUsd ?? candidate.service.costUsd),
       };
       attempts.push(attempt);
       await this.options.hooks?.onCallFinish?.(attempt);
@@ -342,7 +371,7 @@ export class Router {
 
   private async execute(
     candidate: { provider: Provider; service: CatalogueService },
-    args: { capability: Capability; imeiDigits: string; signal: AbortSignal },
+    args: { capability: Capability; imeiDigits: string; signal: AbortSignal; inLock?: InLockHooks },
     referenceId: string,
   ): Promise<ProviderOutcome> {
     const timeout = AbortSignal.timeout(candidate.service.timeoutMs);
@@ -357,6 +386,7 @@ export class Router {
         signal,
         referenceId,
         ...(feedbackUrl !== undefined ? { feedbackUrl } : {}),
+        ...(args.inLock !== undefined ? { inLock: args.inLock } : {}),
       });
     } catch {
       // An adapter that throws is a bug in the adapter, and it must not take the check down.

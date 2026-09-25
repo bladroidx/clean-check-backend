@@ -175,9 +175,22 @@ describe('orders', () => {
       expiresAt: new Date(now.getTime() + 3600_000), createdAt: now, settledAt: now,
     });
 
-    expect((await r.orders.openForImei('shared', 'gsx'))?.id).toBe('o1');
-    expect(await r.orders.openForImei('shared', 'other-service')).toBeUndefined();
-    expect(await r.orders.openForImei('no-such-imei', 'gsx')).toBeUndefined();
+    expect((await r.orders.openForImei('shared', 'gsx', now))?.id).toBe('o1');
+    expect(await r.orders.openForImei('shared', 'other-service', now)).toBeUndefined();
+    expect(await r.orders.openForImei('no-such-imei', 'gsx', now)).toBeUndefined();
+  });
+
+  it('openForImei never attaches to an expired order the worker has not abandoned yet', async () => {
+    const r = await repos();
+    const now = new Date();
+    await r.orders.insert({
+      id: 'o_old', checkId: 'c1', tenantId: 't1', providerId: 'beta', serviceId: 'gsx',
+      capability: 'blacklist.gsma', referenceId: 'ref_old', orderReference: 'sup_old', imeiHash: 'shared',
+      status: 'pending', attempts: 3, nextPollAt: now,
+      expiresAt: new Date(now.getTime() - 1), createdAt: new Date(now.getTime() - 3600_000), settledAt: undefined,
+    });
+    // Still `pending` (the worker has not got to it), but past its TTL: about to be abandoned.
+    expect(await r.orders.openForImei('shared', 'gsx', now)).toBeUndefined();
   });
 });
 
