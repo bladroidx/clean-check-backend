@@ -63,6 +63,9 @@ async function seeded(overrides: Partial<Parameters<Repositories['orders']['inse
     verdict: undefined,
     createdAt: new Date('2026-09-13T00:00:00Z'),
     completedAt: undefined,
+    tier: 'deep',
+    imeiEncrypted: undefined,
+    imeiKeyVersion: undefined,
   });
   await repos.orders.insert({
     id: 'ord_1',

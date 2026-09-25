@@ -86,6 +86,10 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
     verdict: undefined,
     createdAt: startedAt,
     completedAt: undefined,
+    // Tasks 10/11 set these for real; every check here is still bought from a supplier.
+    tier: 'deep',
+    imeiEncrypted: undefined,
+    imeiKeyVersion: undefined,
   });
 
   const sections = new Map<Capability, SectionResult>();

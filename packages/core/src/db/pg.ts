@@ -6,8 +6,11 @@ import type {
   CacheRow,
   CheckRecord,
   CheckRepo,
+  CheckSummary,
   IdempotencyRecord,
   IdempotencyRepo,
+  ImeiRevealRecord,
+  ImeiRevealRepo,
   OrderRepo,
   OrderRow,
   ProviderCallRepo,
@@ -80,7 +83,7 @@ export function createPool(databaseUrl: string, options: PoolOptions = {}): pg.P
  * it honest is a test's job rather than a comment's -- `schema-version.test.ts` fails the moment a
  * migration is added without bumping it.
  */
-export const REQUIRED_SCHEMA_VERSION = '20260916000001';
+export const REQUIRED_SCHEMA_VERSION = '20260925000002';
 
 export interface DatabaseReadiness {
   readonly reachable: boolean;
@@ -149,6 +152,7 @@ export class PgRepositories implements Repositories {
   readonly orders: OrderRepo;
   readonly idempotency: IdempotencyRepo;
   readonly locks: ProviderLock;
+  readonly reveals: ImeiRevealRepo;
 
   constructor(private readonly pool: pg.Pool) {
     this.tenants = new PgTenantRepo(pool);
@@ -159,6 +163,7 @@ export class PgRepositories implements Repositories {
     this.orders = new PgOrderRepo(pool);
     this.idempotency = new PgIdempotencyRepo(pool);
     this.locks = new PgProviderLock(pool);
+    this.reveals = new PgImeiRevealRepo(pool);
   }
 
   async close(): Promise<void> {
@@ -256,8 +261,9 @@ class PgCheckRepo implements CheckRepo {
     await this.pool.query(
       `INSERT INTO checks
          (id, tenant_id, imei_hash, subject_hash, imei_masked, tac, requested_capabilities,
-          status, idempotency_key, credits_charged, verdict, created_at, completed_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          status, idempotency_key, credits_charged, verdict, created_at, completed_at,
+          tier, imei_encrypted, imei_key_version)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [
         record.id,
         record.tenantId,
@@ -272,6 +278,9 @@ class PgCheckRepo implements CheckRepo {
         record.verdict ?? null,
         record.createdAt,
         record.completedAt ?? null,
+        record.tier,
+        record.imeiEncrypted ?? null,
+        record.imeiKeyVersion ?? null,
       ],
     );
   }
@@ -288,12 +297,13 @@ class PgCheckRepo implements CheckRepo {
     );
   }
 
-  async byId(tenantId: string, id: string): Promise<CheckRecord | undefined> {
+  async byId(tenantId: string, id: string, tier?: 'free' | 'deep'): Promise<CheckSummary | undefined> {
+    // Ciphertext is never selected here -- `encryptedImei` is the only read path (ADR-0007).
     const { rows } = await this.pool.query<Record<string, unknown>>(
       `SELECT id, tenant_id, imei_hash, subject_hash, imei_masked, tac, requested_capabilities,
-              status, idempotency_key, credits_charged, verdict, created_at, completed_at
-       FROM checks WHERE tenant_id = $1 AND id = $2`,
-      [tenantId, id],
+              status, idempotency_key, credits_charged, verdict, created_at, completed_at, tier
+       FROM checks WHERE tenant_id = $1 AND id = $2 AND ($3::text IS NULL OR tier = $3)`,
+      [tenantId, id, tier ?? null],
     );
     const row = rows[0];
     if (row === undefined) return undefined;
@@ -311,7 +321,18 @@ class PgCheckRepo implements CheckRepo {
       verdict: (row['verdict'] as Verdict | null) ?? undefined,
       createdAt: row['created_at'] as Date,
       completedAt: (row['completed_at'] as Date | null) ?? undefined,
+      tier: row['tier'] as CheckRecord['tier'],
     };
+  }
+
+  async encryptedImei(id: string): Promise<{ imeiEncrypted: Buffer; imeiKeyVersion: number } | undefined> {
+    const { rows } = await this.pool.query<{ imei_encrypted: Buffer | null; imei_key_version: number | null }>(
+      'SELECT imei_encrypted, imei_key_version FROM checks WHERE id = $1',
+      [id],
+    );
+    const row = rows[0];
+    if (row === undefined || row.imei_encrypted === null || row.imei_key_version === null) return undefined;
+    return { imeiEncrypted: row.imei_encrypted, imeiKeyVersion: row.imei_key_version };
   }
 
   async putSection(section: StoredSection): Promise<void> {
@@ -543,11 +564,11 @@ class PgOrderRepo implements OrderRepo {
     await this.pool.query(
       `INSERT INTO provider_orders
          (id, check_id, tenant_id, provider_id, service_id, capability, reference_id,
-          order_reference, status, attempts, next_poll_at, expires_at, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          order_reference, imei_hash, status, attempts, next_poll_at, expires_at, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [
         row.id, row.checkId, row.tenantId, row.providerId, row.serviceId, row.capability,
-        row.referenceId, row.orderReference ?? null, row.status, row.attempts,
+        row.referenceId, row.orderReference ?? null, row.imeiHash, row.status, row.attempts,
         row.nextPollAt ?? null, row.expiresAt, row.createdAt,
       ],
     );
@@ -586,6 +607,14 @@ class PgOrderRepo implements OrderRepo {
     );
     return rows.map(toOrder);
   }
+  async openForImei(imeiHash: string, serviceId: string): Promise<OrderRow | undefined> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM provider_orders WHERE imei_hash = $1 AND service_id = $2 AND status = 'pending'
+       ORDER BY created_at DESC LIMIT 1`,
+      [imeiHash, serviceId],
+    );
+    return rows[0] === undefined ? undefined : toOrder(rows[0]);
+  }
 }
 
 function toOrder(row: Record<string, unknown>): OrderRow {
@@ -598,7 +627,7 @@ function toOrder(row: Record<string, unknown>): OrderRow {
     capability: row['capability'] as Capability,
     referenceId: String(row['reference_id']),
     orderReference: (row['order_reference'] as string | null) ?? undefined,
-    // Task 9 adds the column; until then no row has one, so `?? ''` rather than a fabricated hash.
+    // `?? ''` covers a pre-Task-9 row from before the column existed, not a value that was never stored.
     imeiHash: (row['imei_hash'] as string | null) ?? '',
     status: row['status'] as OrderRow['status'],
     attempts: Number(row['attempts'] ?? 0),
@@ -661,6 +690,30 @@ class PgIdempotencyRepo implements IdempotencyRepo {
        WHERE tenant_id = $1 AND key = $2`,
       [tenantId, key, patch.checkId ?? null, patch.statusCode ?? null, JSON.stringify(patch.responseBody)],
     );
+  }
+}
+
+/** Append-only by a database trigger (ADR-0007); this repo only ever inserts or reads. */
+class PgImeiRevealRepo implements ImeiRevealRepo {
+  constructor(private readonly pool: pg.Pool) {}
+  async record(row: ImeiRevealRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO imei_reveals (id, check_id, actor, reason, revealed_at) VALUES ($1,$2,$3,$4,$5)`,
+      [row.id, row.checkId, row.actor, row.reason, row.revealedAt],
+    );
+  }
+  async forCheck(checkId: string): Promise<readonly ImeiRevealRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT id, check_id, actor, reason, revealed_at FROM imei_reveals WHERE check_id = $1',
+      [checkId],
+    );
+    return rows.map((row) => ({
+      id: String(row['id']),
+      checkId: String(row['check_id']),
+      actor: String(row['actor']),
+      reason: String(row['reason']),
+      revealedAt: row['revealed_at'] as Date,
+    }));
   }
 }
 

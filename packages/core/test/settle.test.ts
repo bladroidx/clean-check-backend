@@ -67,6 +67,9 @@ async function seed(repos: Repositories, row: OrderRow): Promise<void> {
     verdict: undefined,
     createdAt: row.createdAt,
     completedAt: undefined,
+    tier: 'deep',
+    imeiEncrypted: undefined,
+    imeiKeyVersion: undefined,
   });
   await repos.orders.insert(row);
 }

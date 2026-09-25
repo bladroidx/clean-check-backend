@@ -59,6 +59,15 @@ export interface CheckRecord {
   readonly verdict: Verdict | undefined;
   readonly createdAt: Date;
   readonly completedAt: Date | undefined;
+  /** 'free' (offline tier) or 'deep' (bought from a supplier). ADR-0007. */
+  readonly tier: 'free' | 'deep';
+  /**
+   * `nonce(12) || AES-256-GCM ciphertext || tag(16)`, AAD = check id. Never returned by `byId` --
+   * `encryptedImei` is the only read path (ADR-0007). `undefined` on pre-ADR-0007 rows.
+   */
+  readonly imeiEncrypted: Buffer | undefined;
+  /** Which entry of `IMEI_ENCRYPTION_KEYS` encrypted `imeiEncrypted`. */
+  readonly imeiKeyVersion: number | undefined;
 }
 
 export interface StoredSection {
@@ -68,15 +77,21 @@ export interface StoredSection {
   readonly section: SectionResult;
 }
 
+/** What `byId` returns: everything except the ciphertext. `encryptedImei` is the only read path. */
+export type CheckSummary = Omit<CheckRecord, 'imeiEncrypted' | 'imeiKeyVersion'>;
+
 export interface CheckRepo {
   insert(record: CheckRecord): Promise<void>;
   update(
     id: string,
     patch: Partial<Pick<CheckRecord, 'status' | 'verdict' | 'creditsCharged' | 'completedAt'>>,
   ): Promise<void>;
-  byId(tenantId: string, id: string): Promise<CheckRecord | undefined>;
+  /** Omitting `tier` returns either tier; passing it returns undefined for the other one. */
+  byId(tenantId: string, id: string, tier?: 'free' | 'deep'): Promise<CheckSummary | undefined>;
   putSection(section: StoredSection): Promise<void>;
   sections(checkId: string): Promise<readonly StoredSection[]>;
+  /** The ONLY path that returns ciphertext. See ADR-0007 -- every call site must audit first. */
+  encryptedImei(id: string): Promise<{ imeiEncrypted: Buffer; imeiKeyVersion: number } | undefined>;
 }
 
 export interface ProviderCallRow {
@@ -172,6 +187,11 @@ export interface OrderRepo {
   duePolls(now: Date, limit: number): Promise<readonly OrderRow[]>;
   update(id: string, patch: Partial<OrderRow>): Promise<void>;
   openForCheck(checkId: string): Promise<readonly OrderRow[]>;
+  /**
+   * The most recent pending order for this IMEI and service -- so a second check for the same
+   * device can attach to a job already running instead of buying it twice.
+   */
+  openForImei(imeiHash: string, serviceId: string): Promise<OrderRow | undefined>;
 }
 
 export interface IdempotencyRecord {
@@ -197,6 +217,23 @@ export interface IdempotencyRepo {
   ): Promise<void>;
 }
 
+/**
+ * `id, check_id, actor ('api:<key id>' | 'cli'), reason, revealed_at` -- append-only (ADR-0007).
+ * The audit row is written BEFORE decryption; if it cannot be written, nothing is decrypted.
+ */
+export interface ImeiRevealRecord {
+  readonly id: string;
+  readonly checkId: string;
+  readonly actor: string;
+  readonly reason: string;
+  readonly revealedAt: Date;
+}
+
+export interface ImeiRevealRepo {
+  record(row: ImeiRevealRecord): Promise<void>;
+  forCheck(checkId: string): Promise<readonly ImeiRevealRecord[]>;
+}
+
 export interface Repositories {
   readonly tenants: TenantRepo;
   readonly apiKeys: ApiKeyRepo;
@@ -206,5 +243,6 @@ export interface Repositories {
   readonly orders: OrderRepo;
   readonly idempotency: IdempotencyRepo;
   readonly locks: ProviderLock;
+  readonly reveals: ImeiRevealRepo;
   close(): Promise<void>;
 }

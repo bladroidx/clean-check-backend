@@ -21,6 +21,18 @@ async function repos() {
   return r;
 }
 
+/** A minimally-filled CheckRecord for tests that only care about tier/ciphertext behaviour. */
+function checkRecord(overrides: Partial<Parameters<Awaited<ReturnType<typeof repos>>['checks']['insert']>[0]> = {}) {
+  return {
+    id: 'c', tenantId: 't1', imeiHash: 'h', subjectHash: 's', imeiMasked: '35•••76',
+    tac: undefined, requestedCapabilities: ['blacklist.gsma'] as const, status: 'pending' as const,
+    idempotencyKey: undefined, creditsCharged: 0, verdict: undefined,
+    createdAt: new Date(), completedAt: undefined,
+    tier: 'deep' as const, imeiEncrypted: undefined, imeiKeyVersion: undefined,
+    ...overrides,
+  };
+}
+
 describe('tenants and keys', () => {
   it('round-trips a tenant and returns undefined for an unknown one', async () => {
     const r = await repos();
@@ -64,10 +76,31 @@ describe('checks', () => {
       tac: '35310411', requestedCapabilities: ['blacklist.gsma'], status: 'pending',
       idempotencyKey: undefined, creditsCharged: 0, verdict: undefined,
       createdAt: new Date(), completedAt: undefined,
+      tier: 'deep', imeiEncrypted: undefined, imeiKeyVersion: undefined,
     });
     expect(await r.checks.byId('t1', 'chk_1')).toBeDefined();
     // Another tenant must not be able to read it by guessing the id.
     expect(await r.checks.byId('t2', 'chk_1')).toBeUndefined();
+  });
+
+  it('byId filters by tier', async () => {
+    const r = await repos();
+    await r.checks.insert(checkRecord({ id: 'c1', tier: 'free' }));
+    expect(await r.checks.byId('t1', 'c1', 'deep')).toBeUndefined();
+    expect(await r.checks.byId('t1', 'c1', 'free')).toBeDefined();
+  });
+
+  it('encryptedImei is not exposed on byId', async () => {
+    const r = await repos();
+    await r.checks.insert(
+      checkRecord({ id: 'c2', imeiEncrypted: Buffer.from('x'), imeiKeyVersion: 1 }),
+    );
+    expect(Object.keys((await r.checks.byId('t1', 'c2'))!)).not.toContain('imeiEncrypted');
+    expect(Object.keys((await r.checks.byId('t1', 'c2'))!)).not.toContain('imeiKeyVersion');
+    expect(await r.checks.encryptedImei('c2')).toEqual({
+      imeiEncrypted: Buffer.from('x'),
+      imeiKeyVersion: 1,
+    });
   });
 
   it('upserts a section rather than duplicating it when an async answer lands', async () => {
@@ -124,6 +157,49 @@ describe('orders', () => {
     await r.orders.update('o1', { status: 'answered' });
     expect(await r.orders.openForCheck('c1')).toHaveLength(0);
     expect(await r.orders.duePolls(now, 10)).toHaveLength(0);
+  });
+
+  it('openForImei finds only a pending order for the same imei and service', async () => {
+    const r = await repos();
+    const now = new Date();
+    await r.orders.insert({
+      id: 'o1', checkId: 'c1', tenantId: 't1', providerId: 'beta', serviceId: 'gsx',
+      capability: 'blacklist.gsma', referenceId: 'ref1', orderReference: 'sup1', imeiHash: 'shared',
+      status: 'pending', attempts: 0, nextPollAt: now,
+      expiresAt: new Date(now.getTime() + 3600_000), createdAt: now, settledAt: undefined,
+    });
+    await r.orders.insert({
+      id: 'o2', checkId: 'c2', tenantId: 't1', providerId: 'beta', serviceId: 'gsx',
+      capability: 'blacklist.gsma', referenceId: 'ref2', orderReference: 'sup2', imeiHash: 'shared',
+      status: 'answered', attempts: 1, nextPollAt: undefined,
+      expiresAt: new Date(now.getTime() + 3600_000), createdAt: now, settledAt: now,
+    });
+
+    expect((await r.orders.openForImei('shared', 'gsx'))?.id).toBe('o1');
+    expect(await r.orders.openForImei('shared', 'other-service')).toBeUndefined();
+    expect(await r.orders.openForImei('no-such-imei', 'gsx')).toBeUndefined();
+  });
+});
+
+describe('imei reveals', () => {
+  it('is append-only: record appends, forCheck returns rows for that check', async () => {
+    const r = await repos();
+    await r.reveals.record({
+      id: 'rv1', checkId: 'c1', actor: 'api:k1', reason: 'support ticket #123',
+      revealedAt: new Date('2026-09-25T00:00:00Z'),
+    });
+    await r.reveals.record({
+      id: 'rv2', checkId: 'c1', actor: 'cli', reason: 'support ticket #124',
+      revealedAt: new Date('2026-09-25T00:01:00Z'),
+    });
+    await r.reveals.record({
+      id: 'rv3', checkId: 'c2', actor: 'cli', reason: 'unrelated',
+      revealedAt: new Date('2026-09-25T00:02:00Z'),
+    });
+
+    const forC1 = await r.reveals.forCheck('c1');
+    expect(forC1.map((row) => row.id).sort()).toEqual(['rv1', 'rv2']);
+    expect(await r.reveals.forCheck('nope')).toEqual([]);
   });
 });
 
