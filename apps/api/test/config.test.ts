@@ -10,6 +10,7 @@ import { loadConfig } from '../src/config.js';
  */
 
 const GOOD_PEPPER = 'x'.repeat(32);
+const base = { SERVER_PEPPER: GOOD_PEPPER } as NodeJS.ProcessEnv;
 
 describe('loadConfig', () => {
   it('accepts a 32-byte pepper and applies the defaults', () => {
@@ -66,5 +67,24 @@ describe('loadConfig', () => {
     } catch (e) {
       expect((e as Error).message).not.toContain(secret);
     }
+  });
+
+  it('rejects a non-https IMEI24_BASE_URL', () => {
+    expect(() => loadConfig({ ...base, IMEI24_BASE_URL: 'http://pro.imei24.com' } as NodeJS.ProcessEnv)).toThrow(
+      /IMEI24_BASE_URL/,
+    );
+  });
+
+  it('rejects a wait window above 12 s', () => {
+    expect(() => loadConfig({ ...base, DEEP_CHECK_WAIT_MS: '15000' } as NodeJS.ProcessEnv)).toThrow(
+      /DEEP_CHECK_WAIT_MS/,
+    );
+  });
+
+  it('defaults', () => {
+    const c = loadConfig(base);
+    expect(c.IMEI24_BASE_URL).toBe('https://pro.imei24.com');
+    expect(c.DEEP_CHECK_WAIT_MS).toBe(10_000);
+    expect(c.IMEI24_DAILY_SPEND_USD).toBe(10);
   });
 });

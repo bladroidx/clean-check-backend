@@ -1,11 +1,12 @@
-import { loadConfig } from './config.js';
+import { loadConfig, imei24CredentialsFrom } from './config.js';
 import { buildApp } from './app.js';
 import { createLogger } from './lib/log.js';
 import { loadTacDirectory } from './lib/tac.js';
 import { Metrics } from '@imei-check/core';
 import { MemoryRepositories } from '@imei-check/core';
 import { PgRepositories, checkDatabase, createPool } from '@imei-check/core';
-import { buildProviders, feedbackUrlFor } from './providers/build.js';
+import { buildProviders } from '@imei-check/core';
+import { feedbackUrlFor } from './providers/feedback-url.js';
 import { buildServices } from './services.js';
 import type { Repositories } from '@imei-check/core';
 
@@ -36,7 +37,11 @@ const pool =
 const repos: Repositories | undefined = pool !== undefined ? new PgRepositories(pool) : undefined;
 
 const metrics = new Metrics();
-const built = buildProviders(config);
+const imei24 = imei24CredentialsFrom(config);
+const built = buildProviders({
+  catalogueDir: config.PROVIDER_CATALOGUE_DIR,
+  ...(imei24 !== undefined ? { imei24 } : {}),
+});
 
 for (const skipped of built.skipped) {
   logger.warn({ provider: skipped.providerId, reason: skipped.reason }, 'provider not configured');

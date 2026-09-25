@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import type { Imei24Credentials } from '@imei-check/core';
 
 /**
  * Configuration, validated once at boot.
@@ -61,17 +62,26 @@ export const ConfigSchema = z.object({
    */
   PUBLIC_BASE_URL: z.string().url().optional(),
 
-  ALPHA_BASE_URL: z.string().url().optional(),
-  ALPHA_USERNAME: z.string().optional(),
-  ALPHA_API_KEY: z.string().optional(),
-
-  BETA_BASE_URL: z.string().url().optional(),
-  BETA_TOKEN: z.string().optional(),
-  /** Without this, inbound feedback webhooks are REFUSED rather than trusted. */
-  BETA_WEBHOOK_SECRET: z.string().optional(),
-
-  IMEI24_BASE_URL: z.string().url().optional(),
+  IMEI24_BASE_URL: z
+    .string()
+    .url()
+    .refine((u) => u.startsWith('https://'), {
+      message: 'IMEI24_BASE_URL must be https: the request body carries the API key and the IMEI',
+    })
+    .default('https://pro.imei24.com'),
+  /** The imei24 account email (DHRU "username"). */
+  IMEI24_USERNAME: z.string().optional(),
   IMEI24_API_KEY: z.string().optional(),
+  /** Hard stop on supplier spend per UTC day, across API and worker. */
+  IMEI24_DAILY_SPEND_USD: z.coerce.number().positive().default(10),
+  /**
+   * How long POST /v1/deep_checks waits for slow orders before handing off to polling. Must stay
+   * below every caller's timeout: the Android app reads for 15 s and check-this-phone-backend
+   * gives up after 20 s. A window longer than that means the phone times out while we still pay.
+   */
+  DEEP_CHECK_WAIT_MS: z.coerce.number().int().min(0).max(12_000).default(10_000),
+  /** `version:base64key[,version:base64key]` -- ADR-0007. Enforced when DATABASE_URL is set. */
+  IMEI_ENCRYPTION_KEYS: z.string().optional(),
 
   /** Free tier limits are licensing controls as much as abuse controls (ADR-0005). */
   RATE_LIMIT_ENABLED: z.coerce.boolean().default(true),
@@ -90,4 +100,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid configuration:\n${problems}`);
   }
   return parsed.data;
+}
+
+/** `undefined` when the account isn't configured -- imei24 is then simply not built (a supported mode). */
+export function imei24CredentialsFrom(config: Config): Imei24Credentials | undefined {
+  if (!config.IMEI24_USERNAME || !config.IMEI24_API_KEY) return undefined;
+  return { baseUrl: config.IMEI24_BASE_URL, username: config.IMEI24_USERNAME, apiKey: config.IMEI24_API_KEY };
 }

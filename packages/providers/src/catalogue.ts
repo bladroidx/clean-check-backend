@@ -25,6 +25,7 @@ interface RawService {
   async?: unknown;
   timeout_ms?: unknown;
   applies_to_tac_prefixes?: unknown;
+  applies_to_manufacturers?: unknown;
   enabled?: unknown;
   disabled_reason?: unknown;
 }
@@ -95,6 +96,17 @@ function parseService(raw: RawService, providerId: string, where: string): Catal
 
   const disabledReason = raw.disabled_reason;
 
+  let appliesToManufacturers: readonly string[] | undefined;
+  if (raw.applies_to_manufacturers !== undefined) {
+    const manufacturers = arr(raw.applies_to_manufacturers, `${where}.applies_to_manufacturers`).map((m) =>
+      str(m, `${where}.applies_to_manufacturers[]`).toLowerCase(),
+    );
+    if (manufacturers.length === 0) {
+      throw new CatalogueError(`${where}.applies_to_manufacturers must not be empty`);
+    }
+    appliesToManufacturers = manufacturers;
+  }
+
   return {
     serviceId,
     providerId,
@@ -107,6 +119,7 @@ function parseService(raw: RawService, providerId: string, where: string): Catal
     async: raw.async === true,
     timeoutMs: raw.timeout_ms === undefined ? 20_000 : num(raw.timeout_ms, `${where}.timeout_ms`),
     appliesToTacPrefixes: prefixes,
+    ...(appliesToManufacturers !== undefined ? { appliesToManufacturers } : {}),
     enabled: raw.enabled !== false,
     ...(typeof disabledReason === 'string' ? { disabledReason } : {}),
   };
@@ -138,4 +151,18 @@ export function loadCatalogueFile(path: string): CatalogueService[] {
 /** `['*']` matches everything; otherwise a TAC must start with one of the listed prefixes. */
 export function coversTac(service: CatalogueService, tac: string): boolean {
   return service.appliesToTacPrefixes.some((p) => p === '*' || tac.startsWith(p));
+}
+
+/**
+ * TAC coverage, plus a brand check when the service declares one.
+ *
+ * A brand service (e.g. imei24's Apple all-in-one) can cover every TAC -- `["*"]` -- including
+ * ones missing from our bundled seed, while still being refused for a device the TAC directory
+ * says is the wrong brand, or whose manufacturer we don't know at all (`manufacturer === undefined`
+ * never satisfies a restriction: an unknown device is not evidence it's the right brand).
+ */
+export function coversDevice(service: CatalogueService, tac: string, manufacturer: string | undefined): boolean {
+  if (!coversTac(service, tac)) return false;
+  if (service.appliesToManufacturers === undefined) return true;
+  return manufacturer !== undefined && service.appliesToManufacturers.includes(manufacturer.toLowerCase());
 }

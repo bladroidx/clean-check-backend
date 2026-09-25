@@ -8,3 +8,4 @@ export * from './report/tac-coverage.js';
 export * from './cache/ttl.js';
 export * from './cache/store.js';
 export * from './metrics.js';
+export * from './providers/build.js';

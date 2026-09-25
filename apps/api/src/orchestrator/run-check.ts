@@ -154,9 +154,11 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
       continue;
     }
 
+    const manufacturer = deps.tacDirectory.lookup(tac)?.manufacturer;
     const routed = await deps.router.run({
       capability,
       tac,
+      ...(manufacturer !== undefined ? { manufacturer } : {}),
       imeiDigits: request.imei.digits,
       signal: request.signal,
     });

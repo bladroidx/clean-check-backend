@@ -286,7 +286,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
 
         const capabilities = [];
         for (const capability of Capability.options) {
-          const candidates = services.router.candidates(capability, tac);
+          const candidates = services.router.candidates(capability, tac, app.tacDirectory.lookup(tac)?.manufacturer);
           const cachedFields = await services.cache.read({
             imeiHash,
             capability,

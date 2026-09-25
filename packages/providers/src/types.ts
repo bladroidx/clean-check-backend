@@ -103,6 +103,13 @@ export interface CatalogueService {
   readonly timeoutMs: number;
   /** TAC prefixes or `['*']`. A GSX service that claims to cover Samsung is a catalogue bug. */
   readonly appliesToTacPrefixes: readonly string[];
+  /**
+   * When present, this service additionally requires the device's TAC-directory manufacturer to be
+   * one of these (lowercased). Lets a brand service use `applies_to_tac_prefixes: ["*"]` --
+   * covering every TAC, including ones missing from our bundled seed -- while still being refused
+   * for the wrong brand. `undefined` means no manufacturer restriction at all.
+   */
+  readonly appliesToManufacturers?: readonly string[];
   readonly enabled: boolean;
   readonly disabledReason?: string;
 }

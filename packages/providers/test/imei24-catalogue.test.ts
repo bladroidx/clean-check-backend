@@ -29,9 +29,11 @@ describe('imei24 catalogue', () => {
     }
   });
 
-  it('486 is the only wildcard blacklist service', () => {
-    const wild = services.filter((s) => s.appliesToTacPrefixes.includes('*'));
-    expect(wild.map((s) => s.serviceId)).toEqual(['486']);
+  it('486 is the only blacklist service with no manufacturer restriction', () => {
+    const unrestricted = services.filter(
+      (s) => s.capabilities.includes('blacklist.gsma') && s.appliesToManufacturers === undefined,
+    );
+    expect(unrestricted.map((s) => s.serviceId)).toEqual(['486']);
   });
 });
 

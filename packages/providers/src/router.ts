@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Capability } from '@imei-check/contract';
 import type { BreakerRegistry } from './breaker.js';
-import { coversTac } from './catalogue.js';
+import { coversDevice } from './catalogue.js';
 import type { CatalogueService, Provider, ProviderOutcome } from './types.js';
 
 /**
@@ -13,8 +13,14 @@ export interface PlannedCall {
   readonly candidates: ReadonlyArray<{ provider: Provider; service: CatalogueService }>;
 }
 
-/** `['*']` is the least specific match; a listed TAC prefix beats it. */
+/**
+ * A service is brand-specific -- specificity 1 -- if it declares a manufacturer restriction OR a
+ * non-wildcard TAC prefix list. `["*"]` with no manufacturer restriction is the least specific
+ * match there is: it is the only thing left standing once the brand and TAC-specific candidates are
+ * exhausted.
+ */
 function specificity(service: CatalogueService): number {
+  if (service.appliesToManufacturers !== undefined) return 1;
   return service.appliesToTacPrefixes.includes('*') ? 0 : 1;
 }
 
@@ -108,20 +114,30 @@ export interface RouterOptions {
 export class Router {
   constructor(private readonly options: RouterOptions) {}
 
-  /** Every enabled service, from every provider, that covers this TAC -- unfiltered by capability. */
-  private servicesFor(tac: string): Array<{ provider: Provider; service: CatalogueService }> {
+  /**
+   * Every enabled service, from every provider, that covers this device -- unfiltered by
+   * capability. `manufacturer` is the TAC directory's answer, if any; `undefined` means unknown.
+   */
+  private servicesFor(
+    tac: string,
+    manufacturer: string | undefined,
+  ): Array<{ provider: Provider; service: CatalogueService }> {
     const out: Array<{ provider: Provider; service: CatalogueService }> = [];
     for (const provider of this.options.providers) {
       for (const service of provider.catalogue()) {
-        if (service.enabled && coversTac(service, tac)) out.push({ provider, service });
+        if (service.enabled && coversDevice(service, tac, manufacturer)) out.push({ provider, service });
       }
     }
     return out;
   }
 
   /** Ordered candidates: brand-specific first, then cheapest. Used by `POST /v1/capabilities`. */
-  candidates(capability: Capability, tac: string): Array<{ provider: Provider; service: CatalogueService }> {
-    return this.servicesFor(tac)
+  candidates(
+    capability: Capability,
+    tac: string,
+    manufacturer?: string,
+  ): Array<{ provider: Provider; service: CatalogueService }> {
+    return this.servicesFor(tac, manufacturer)
       .filter((c) => c.service.capabilities.includes(capability))
       .sort(ranked);
   }
@@ -131,8 +147,12 @@ export class Router {
    * capabilities (ties: brand-specific, then cheaper). One Apple all-in-one then costs one order,
    * not four -- imei24 charges again for every repeat.
    */
-  plan(capabilities: readonly Capability[], tac: string): { calls: PlannedCall[]; uncovered: Capability[] } {
-    const pool = this.servicesFor(tac);
+  plan(
+    capabilities: readonly Capability[],
+    tac: string,
+    manufacturer?: string,
+  ): { calls: PlannedCall[]; uncovered: Capability[] } {
+    const pool = this.servicesFor(tac, manufacturer);
     let remaining = [...new Set(capabilities)];
     const calls: PlannedCall[] = [];
 
@@ -159,10 +179,11 @@ export class Router {
   async run(args: {
     capability: Capability;
     tac: string;
+    manufacturer?: string;
     imeiDigits: string;
     signal: AbortSignal;
   }): Promise<RouteResult> {
-    const { calls } = this.plan([args.capability], args.tac);
+    const { calls } = this.plan([args.capability], args.tac, args.manufacturer);
     const call = calls[0] ?? { capabilities: [args.capability], candidates: [] };
     return this.runCall({ call, imeiDigits: args.imeiDigits, signal: args.signal });
   }

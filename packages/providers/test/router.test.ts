@@ -291,6 +291,52 @@ describe('plan / runCall', () => {
     await router.runCall({ call, imeiDigits: 'x', signal: AbortSignal.timeout(1000) });
     expect(provider.executed).toHaveLength(1);
   });
+
+  const appleByBrand = service({
+    serviceId: '690',
+    capabilities: ['blacklist.gsma', 'lock.activation', 'lock.carrier', 'warranty.purchase_date'],
+    fields: ['blacklist.status', 'lock.activation.status', 'lock.carrier.status', 'warranty.purchase_date'],
+    appliesToTacPrefixes: ['*'],
+    appliesToManufacturers: ['apple'],
+    costUsd: 0.12,
+  });
+  const samsungByBrand = service({
+    serviceId: '783',
+    capabilities: ['blacklist.gsma', 'warranty.purchase_date'],
+    fields: ['blacklist.status', 'warranty.purchase_date'],
+    appliesToTacPrefixes: ['*'],
+    appliesToManufacturers: ['samsung'],
+    costUsd: 0.1,
+  });
+
+  function routerWithManufacturerServices(services: CatalogueService[]): Router {
+    return new Router({ providers: [new MultiServiceProvider('p', services)], breakers: new BreakerRegistry() });
+  }
+
+  it('an Apple manufacturer chooses the brand-restricted service for all four capabilities in one call', () => {
+    const router = routerWithManufacturerServices([wild, appleByBrand]);
+    const { calls, uncovered } = router.plan(
+      ['blacklist.gsma', 'lock.activation', 'lock.carrier', 'warranty.purchase_date'],
+      '00000000',
+      'Apple',
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.candidates[0]?.service.serviceId).toBe('690');
+    expect(uncovered).toEqual([]);
+  });
+
+  it('an unknown manufacturer (undefined) only gets the unrestricted wildcard; brand-only capabilities are uncovered', () => {
+    const router = routerWithManufacturerServices([wild, appleByBrand]);
+    const { calls, uncovered } = router.plan(['blacklist.gsma', 'lock.activation'], '00000000', undefined);
+    expect(calls.map((c) => c.candidates[0]?.service.serviceId)).toEqual(['486']);
+    expect(uncovered).toEqual(['lock.activation']);
+  });
+
+  it('manufacturer match is case-insensitive ("Samsung" matches "samsung")', () => {
+    const router = routerWithManufacturerServices([wild, samsungByBrand]);
+    const { calls } = router.plan(['blacklist.gsma'], '00000000', 'Samsung');
+    expect(calls[0]?.candidates.map((c) => c.service.serviceId)).toEqual(['783', '486']);
+  });
 });
 
 describe('circuit breaker', () => {

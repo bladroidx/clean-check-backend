@@ -9,10 +9,12 @@
 # billing was removed (CLAUDE.md "Money") — this service runs single-consumer for one seeded tenant
 # and nothing is ever charged on the wire.
 #
-# TAC prefixes below are placeholders, not the real brand ranges. Task 6 generates the full list
-# from the TAC directory; until then Apple/Samsung use the two TACs already used in this repo's own
-# tests (35310411, 35847191) and every other brand uses a dummy prefix that parses but matches
-# nothing in practice.
+# Brand services below use applies_to_tac_prefixes: ["*"] plus applies_to_manufacturers: [<brand>]
+# (ADR-0002/router.ts coversDevice), NOT a generated TAC prefix list: the bundled TAC seed
+# (testdata/tac-seed.json) has only a handful of TACs, so a prefix list built from it would send
+# almost every real device of that brand to the wildcard blacklist-only service (486) instead. The
+# manufacturer comes from the TAC directory lookup at the call site, so a brand service covers every
+# TAC of that brand, seeded or not, and is refused outright when the manufacturer is unknown.
 provider_id: imei24
 services:
   - service_id: "486"
@@ -43,7 +45,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["35310411"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [apple]
     enabled: true
 
   - service_id: "678"
@@ -55,7 +58,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["35310411"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [apple]
     enabled: true
 
   - service_id: "783"
@@ -67,7 +71,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["35847191"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [samsung]
     enabled: true
 
   - service_id: "487"
@@ -79,12 +84,12 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["35847191"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [samsung]
     enabled: true
 
   # Per-brand warranty checks. All 0.10 USD, lexicon imei24-warranty, capabilities
-  # [warranty.purchase_date], fields [warranty.purchase_date, identity.model]. TAC prefixes are
-  # dummy placeholders that parse but match nothing real yet — Task 6 replaces them.
+  # [warranty.purchase_date], fields [warranty.purchase_date, identity.model].
   - service_id: "428"
     display_name: "Motorola Warranty Status"
     capabilities: [warranty.purchase_date]
@@ -94,7 +99,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [motorola]
     enabled: true
 
   - service_id: "437"
@@ -106,7 +112,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [huawei]
     enabled: true
 
   - service_id: "429"
@@ -118,7 +125,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [lg]
     enabled: true
 
   - service_id: "467"
@@ -130,7 +138,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [sony]
     enabled: true
 
   - service_id: "485"
@@ -142,7 +151,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [lenovo]
     enabled: true
 
   - service_id: "707"
@@ -154,7 +164,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [oppo]
     enabled: true
 
   - service_id: "709"
@@ -166,7 +177,8 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [vivo]
     enabled: true
 
   - service_id: "488"
@@ -178,5 +190,6 @@ services:
     credits: 0
     async: true
     timeout_ms: 8000
-    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    applies_to_tac_prefixes: ["*"]
+    applies_to_manufacturers: [htc]
     enabled: true

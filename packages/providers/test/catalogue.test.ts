@@ -1,7 +1,7 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CatalogueError, coversTac, loadCatalogueFile, parseCatalogue } from '../src/catalogue.js';
+import { CatalogueError, coversDevice, coversTac, loadCatalogueFile, parseCatalogue } from '../src/catalogue.js';
 import { lexiconFor } from '../src/normalise/lexicons.js';
 
 /**
@@ -77,6 +77,58 @@ describe('parsing', () => {
   it('defaults a timeout rather than leaving one unbounded', () => {
     const yaml = VALID.replace('    timeout_ms: 15000\n', '');
     expect(parseCatalogue(yaml, 't')[0]?.timeoutMs).toBe(20_000);
+  });
+
+  it('parses and lowercases applies_to_manufacturers', () => {
+    const yaml = VALID.replace(
+      '    applies_to_tac_prefixes: ["*"]\n',
+      '    applies_to_tac_prefixes: ["*"]\n    applies_to_manufacturers: ["Apple"]\n',
+    );
+    expect(parseCatalogue(yaml, 't')[0]?.appliesToManufacturers).toEqual(['apple']);
+  });
+
+  it('leaves appliesToManufacturers undefined when absent', () => {
+    expect(parseCatalogue(VALID, 't')[0]?.appliesToManufacturers).toBeUndefined();
+  });
+
+  it('rejects an empty applies_to_manufacturers list', () => {
+    const yaml = VALID.replace(
+      '    applies_to_tac_prefixes: ["*"]\n',
+      '    applies_to_tac_prefixes: ["*"]\n    applies_to_manufacturers: []\n',
+    );
+    expect(() => parseCatalogue(yaml, 't')).toThrow(CatalogueError);
+  });
+});
+
+describe('device coverage (TAC + manufacturer)', () => {
+  it('with no manufacturer restriction, TAC coverage alone decides', () => {
+    const service = parseCatalogue(VALID, 't')[0];
+    expect(service && coversDevice(service, '35310411', undefined)).toBe(true);
+    expect(service && coversDevice(service, '35310411', 'Apple')).toBe(true);
+  });
+
+  it('a manufacturer-restricted service requires a matching, case-insensitive manufacturer', () => {
+    const yaml = VALID.replace(
+      '    applies_to_tac_prefixes: ["*"]\n',
+      '    applies_to_tac_prefixes: ["*"]\n    applies_to_manufacturers: ["apple"]\n',
+    );
+    const service = parseCatalogue(yaml, 't')[0];
+    expect(service && coversDevice(service, '35310411', 'Apple')).toBe(true);
+    expect(service && coversDevice(service, '35310411', 'apple')).toBe(true);
+    expect(service && coversDevice(service, '35310411', 'Samsung')).toBe(false);
+    expect(service && coversDevice(service, '35310411', undefined)).toBe(false);
+  });
+
+  it('still requires TAC coverage even when the manufacturer matches', () => {
+    const yaml = VALID.replace(
+      'applies_to_tac_prefixes: ["*"]',
+      'applies_to_tac_prefixes: ["99999999"]',
+    ).replace(
+      '    applies_to_tac_prefixes: ["99999999"]\n',
+      '    applies_to_tac_prefixes: ["99999999"]\n    applies_to_manufacturers: ["apple"]\n',
+    );
+    const service = parseCatalogue(yaml, 't')[0];
+    expect(service && coversDevice(service, '35310411', 'Apple')).toBe(false);
   });
 });
 
@@ -162,14 +214,14 @@ describe('the shipped catalogue', () => {
     ).toEqual([]);
   });
 
-  it('never claims an Apple-only service covers every TAC', () => {
+  it('never claims an Apple-only service covers every device with no manufacturer restriction', () => {
     for (const service of services) {
       const appleOnly = service.capabilities.includes('lock.activation');
-      if (appleOnly) {
+      if (appleOnly && service.appliesToTacPrefixes.includes('*')) {
         expect(
-          service.appliesToTacPrefixes,
-          `${service.providerId}/${service.serviceId} claims activation lock for all TACs`,
-        ).not.toContain('*');
+          service.appliesToManufacturers,
+          `${service.providerId}/${service.serviceId} claims activation lock for every device`,
+        ).toBeDefined();
       }
     }
   });
