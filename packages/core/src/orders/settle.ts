@@ -1,11 +1,11 @@
-import { deriveVerdict, type Capability } from '@imei-check/contract';
+import { deriveVerdict, unavailable, type Capability, type SectionResult } from '@imei-check/contract';
 import type { TacDirectory } from '@imei-check/identity';
-import { capabilityOf, type FieldValue, type Provider } from '@imei-check/providers';
+import { capabilityOf, type FieldValue, type Provider, type ProviderOutcome } from '@imei-check/providers';
 import { FieldCache } from '../cache/store.js';
 import type { OrderRow, Repositories } from '../db/types.js';
 import type { Metrics } from '../metrics.js';
 import { coverageFor } from '../report/coverage.js';
-import { assembleSection } from '../report/assemble.js';
+import { assembleSection, deriveWarrantyStatus } from '../report/assemble.js';
 
 /**
  * Settles standard (non-express) supplier orders -- shared by the API and the worker.
@@ -84,7 +84,7 @@ export async function pollOrders(
   const groups = new Map<string, OrderRow[]>();
   for (const order of orders) {
     if (order.expiresAt <= at) {
-      await abandon(deps, order, at);
+      await abandon(deps, order, at, 'The supplier never returned a result.');
       abandoned += 1;
       continue;
     }
@@ -114,7 +114,7 @@ export async function pollOrders(
     // rather than guessing which lexicon applies.
     const service = provider?.catalogue().find((s) => s.serviceId === head.serviceId);
     if (provider?.poll === undefined || service === undefined || head.orderReference === undefined) {
-      for (const order of rows) await abandon(deps, order, at);
+      for (const order of rows) await abandon(deps, order, at, 'The order can no longer be polled.');
       abandoned += rows.length;
       continue;
     }
@@ -165,34 +165,7 @@ export async function pollOrders(
     }
 
     for (const order of rows) {
-      const section = assembleSection({
-        capability: order.capability,
-        outcome,
-        coverage: coverageFor(order.capability, deps.tacDirectory),
-        checkedAt: at,
-        onLexiconMiss: (miss) => {
-          deps.metrics.lexiconMiss.inc({ capability: miss.capability, service_id: miss.serviceId });
-        },
-      });
-
-      await deps.repos.checks.putSection({
-        checkId: order.checkId,
-        capability: order.capability,
-        outcome: section.outcome,
-        section,
-      });
-      deps.metrics.sectionOutcome.inc({
-        capability: order.capability,
-        outcome: section.outcome,
-        reason: section.reason ?? 'none',
-      });
-
-      await deps.repos.orders.update(order.id, {
-        status: outcome.kind === 'answered' ? 'answered' : 'rejected',
-        settledAt: at,
-      });
-
-      await completeIfDone(deps, order, at);
+      await settleOrder(deps, order, outcome, at);
       answered += 1;
     }
   }
@@ -208,47 +181,133 @@ export async function pollDueOrders(deps: SettleDeps): Promise<PollSummary> {
 }
 
 /**
- * Gives up and says so in the report.
- *
- * The order timed out: the supplier never answered. `unavailable(awaiting_provider_timed_out)` is
- * the honest outcome -- we never obtained an answer, so nothing is claimed.
+ * Settles ONE order row with a supplier's final answer (answered or rejected): its section, the
+ * section derived from it, the order row and the check. Shared by the poll path above and the
+ * inbound webhook route, so the two cannot drift on what "settled" means.
  */
-async function abandon(deps: SettleDeps, order: OrderRow, at: Date): Promise<void> {
+export async function settleOrder(
+  deps: SettleDeps,
+  order: OrderRow,
+  outcome: Extract<ProviderOutcome, { kind: 'answered' | 'rejected' }>,
+  at: Date,
+): Promise<void> {
   const section = assembleSection({
     capability: order.capability,
-    outcome: { kind: 'failed', reason: 'timeout', detail: 'The supplier never returned a result.' },
+    outcome,
     coverage: coverageFor(order.capability, deps.tacDirectory),
     checkedAt: at,
+    onLexiconMiss: (miss) => {
+      deps.metrics.lexiconMiss.inc({ capability: miss.capability, service_id: miss.serviceId });
+    },
+  });
+  await putSection(deps, order.checkId, section);
+
+  await deps.repos.orders.update(order.id, {
+    status: outcome.kind === 'answered' ? 'answered' : 'rejected',
+    settledAt: at,
   });
 
-  await deps.repos.checks.putSection({
-    checkId: order.checkId,
-    capability: order.capability,
-    outcome: section.outcome,
-    section,
-  });
-  await deps.repos.orders.update(order.id, { status: 'abandoned', settledAt: at });
-  deps.metrics.sectionOutcome.inc({
-    capability: order.capability,
-    outcome: 'unavailable',
-    reason: 'awaiting_provider_timed_out',
-  });
-  deps.log?.({ order_id: order.id, check_id: order.checkId }, 'order abandoned');
-  await completeIfDone(deps, order, at);
+  if (order.capability === 'warranty.purchase_date') {
+    const purchase =
+      outcome.kind === 'answered'
+        ? outcome.fields.find((f) => f.field === 'warranty.purchase_date')
+        : undefined;
+    await rederiveWarranty(deps, order.checkId, at, purchase?.value);
+  }
+
+  await refreshCheck(deps, order.checkId, at);
 }
 
 /**
- * Marks the check complete once no order is left open for it, and recomputes the verdict from
- * every stored section rather than trusting whatever it was set to before this order settled --
- * an async section landing is exactly the case where the synchronous verdict was provisional.
+ * Gives up and says so in the report.
+ *
+ * We never obtained an answer: `unavailable(awaiting_provider_timed_out)` is the honest outcome
+ * (spec section 5, R14) -- not `provider_timeout`, which would claim the supplier timed out on a
+ * request, when what happened is that we stopped waiting for an order.
  */
-async function completeIfDone(deps: SettleDeps, order: OrderRow, at: Date): Promise<void> {
-  const open = await deps.repos.orders.openForCheck(order.checkId);
-  if (open.length === 0) {
-    const sections = await deps.repos.checks.sections(order.checkId);
-    const { verdict } = deriveVerdict(sections.map((s) => s.section));
-    await deps.repos.checks.update(order.checkId, { status: 'complete', verdict, completedAt: at });
+async function abandon(deps: SettleDeps, order: OrderRow, at: Date, detail: string): Promise<void> {
+  await putSection(
+    deps,
+    order.checkId,
+    unavailable({
+      capability: order.capability,
+      reason: 'awaiting_provider_timed_out',
+      detail,
+      coverage: coverageFor(order.capability, deps.tacDirectory),
+      checkedAt: at,
+    }),
+  );
+  await deps.repos.orders.update(order.id, { status: 'abandoned', settledAt: at });
+  if (order.capability === 'warranty.purchase_date') {
+    await rederiveWarranty(deps, order.checkId, at, undefined, true);
   }
+  deps.log?.({ order_id: order.id, check_id: order.checkId }, 'order abandoned');
+  await refreshCheck(deps, order.checkId, at);
+}
+
+async function putSection(deps: SettleDeps, checkId: string, section: SectionResult): Promise<void> {
+  await deps.repos.checks.putSection({
+    checkId,
+    capability: section.capability,
+    outcome: section.outcome,
+    section,
+  });
+  deps.metrics.sectionOutcome.inc({
+    capability: section.capability,
+    outcome: section.outcome,
+    reason: section.reason ?? 'none',
+  });
+}
+
+/**
+ * `warranty.status` is derived from `warranty.purchase_date` (ADR-0004), and on the deep route the
+ * purchase date is always an async order -- so at placement the derived section can only say
+ * `inconclusive(awaiting_provider)`. This is where it is re-derived once the date lands (final
+ * review F4). Only a section still waiting is touched: a check that never asked for warranty
+ * status gains nothing, and a settled one is not rewritten.
+ */
+async function rederiveWarranty(
+  deps: SettleDeps,
+  checkId: string,
+  at: Date,
+  purchaseDateIso: string | undefined,
+  abandoned = false,
+): Promise<void> {
+  const stored = (await deps.repos.checks.sections(checkId)).find((s) => s.capability === 'warranty.status');
+  if (stored === undefined) return;
+  if (stored.section.outcome !== 'inconclusive' || stored.section.reason !== 'awaiting_provider') return;
+
+  const coverage = coverageFor('warranty.status', deps.tacDirectory);
+  const section =
+    purchaseDateIso !== undefined
+      ? deriveWarrantyStatus({ purchaseDateIso, coverage, checkedAt: at })
+      : unavailable({
+          capability: 'warranty.status',
+          checkedAt: at,
+          coverage,
+          reason: abandoned ? 'awaiting_provider_timed_out' : 'capability_not_supported_for_device',
+          detail: abandoned
+            ? 'Warranty status is derived from a purchase date, and the supplier never returned one.'
+            : 'Warranty status is derived from a purchase date, and no purchase date was ' +
+              'available for this device.',
+        });
+  await putSection(deps, checkId, section);
+}
+
+/**
+ * Recomputes the verdict from every stored section on EVERY settle, not just the last one: a
+ * `fail` landing while another order is still open must turn the summary red at once rather than
+ * sit under the provisional amber (final review F5). The check is marked complete once no order is
+ * left open for it.
+ */
+async function refreshCheck(deps: SettleDeps, checkId: string, at: Date): Promise<void> {
+  const sections = await deps.repos.checks.sections(checkId);
+  const { verdict } = deriveVerdict(sections.map((s) => s.section));
+  const open = await deps.repos.orders.openForCheck(checkId);
+  await deps.repos.checks.update(
+    checkId,
+    open.length === 0 ? { status: 'complete', verdict, completedAt: at } : { verdict },
+  );
 }
 
 export function backoffFor(attempts: number): number {

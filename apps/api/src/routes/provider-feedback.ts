@@ -1,8 +1,7 @@
 import { z } from 'zod';
 import { ErrorResponse } from '@imei-check/contract';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
-import { assembleSection } from '@imei-check/core';
-import { coverageFor } from '@imei-check/core';
+import { settleOrder } from '@imei-check/core';
 import type { AppServices } from '../services.js';
 import '../lib/raw-body.js';
 
@@ -71,48 +70,28 @@ export function providerFeedbackRoutes(services: AppServices): FastifyPluginAsyn
         const tenant = await services.repos.tenants.byId(order.tenantId);
         if (tenant === undefined) return reply.code(202).send({ received: true });
 
-        const now = new Date();
-        // Gate 3: OUR record of what was asked decides the capability.
-        const capability = order.capability;
-        const section = assembleSection({
-          capability,
-          outcome: parsed.outcome,
-          coverage: coverageFor(capability, app.tacDirectory),
-          checkedAt: now,
-          onLexiconMiss: (miss) => {
-            services.metrics.lexiconMiss.inc({
-              capability: miss.capability,
-              service_id: miss.serviceId,
-            });
-          },
-        });
-
-        await services.repos.checks.putSection({
-          checkId: order.checkId,
-          capability,
-          outcome: section.outcome,
-          section,
-        });
-        services.metrics.sectionOutcome.inc({
-          capability,
-          outcome: section.outcome,
-          reason: section.reason ?? 'none',
-        });
-
-        await services.repos.orders.update(order.id, {
-          status: parsed.outcome.kind === 'answered' ? 'answered' : 'rejected',
-          settledAt: now,
-        });
-
-        const check = await services.repos.checks.byId(order.tenantId, order.checkId);
-
-        const open = await services.repos.orders.openForCheck(order.checkId);
-        if (open.length === 0 && check !== undefined) {
-          await services.repos.checks.update(order.checkId, {
-            status: 'complete',
-            completedAt: now,
-          });
+        // Only a FINAL answer settles an order. "Still pending" or "failed" from a webhook is not
+        // one: the order stays open for the worker to poll and, if need be, abandon honestly.
+        const outcome = parsed.outcome;
+        if (outcome.kind !== 'answered' && outcome.kind !== 'rejected') {
+          return reply.code(202).send({ received: true });
         }
+
+        // Gate 3: OUR record of what was asked decides the capability -- `settleOrder` builds the
+        // section from `order.capability`, never from the payload. It is the same settlement the
+        // worker's poll runs (section, derived warranty status, verdict, completion), so the two
+        // paths cannot drift.
+        await settleOrder(
+          {
+            repos: services.repos,
+            providers: services.providers,
+            tacDirectory: app.tacDirectory,
+            metrics: services.metrics,
+          },
+          order,
+          outcome,
+          new Date(),
+        );
 
         return reply.code(200).send({ received: true });
       },

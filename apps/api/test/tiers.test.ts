@@ -375,3 +375,57 @@ describe('concurrent deep checks for one IMEI (R17)', () => {
     expect(sections.filter((s) => s?.freshness?.cached === true)).toHaveLength(1);
   });
 });
+
+describe('settling after the POST (final review F4, F5)', () => {
+  const worker = (h: Awaited<ReturnType<typeof makePaidApp>>) =>
+    pollDueOrders({
+      repos: h.repos,
+      providers: h.services.providers,
+      tacDirectory: h.app.tacDirectory,
+      metrics: h.services.metrics,
+      now: () => new Date(Date.now() + 6 * 60 * 1000),
+    });
+  const get = async (h: Awaited<ReturnType<typeof makePaidApp>>, id: string) =>
+    (await h.app.inject({ method: 'GET', url: `/v1/deep_checks/${id}`, headers: h.auth() })).json<CheckReport>();
+
+  it('warranty.status waits for a pending purchase date, then is derived from it', async () => {
+    // Every imei24 purchase-date service is async, so this is the normal deep-route shape.
+    const provider = new FakeProvider('fake', { kind: 'pending', orderReference: 'w1' }, [
+      service({ providerId: 'fake', serviceId: 'w', async: true, capabilities: ['warranty.purchase_date'], fields: ['warranty.purchase_date'] }),
+    ]);
+    provider.pollOutcomes = [{ kind: 'pending', orderReference: 'w1' }];
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: 50, pollIntervalMs: 10 });
+
+    const report = (await post(h, '/v1/deep_checks', { imei: SENTINEL, capabilities: ['warranty.status'] })).json<CheckReport>();
+    // Not "capability_not_supported_for_device": the fact it is derived from is on its way.
+    expect(report.sections['warranty.status']).toMatchObject({ outcome: 'inconclusive', reason: 'awaiting_provider', remedy: 'retry_later' });
+    expect(report.status).toBe('partial');
+
+    const recent = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    provider.pollOutcomes = [{ kind: 'answered', fields: [{ field: 'warranty.purchase_date', value: recent }], misses: [] }];
+    await worker(h);
+
+    const later = await get(h, report.check_id);
+    expect(later.sections['warranty.purchase_date']?.outcome).toBe('pass');
+    expect(later.sections['warranty.status']).toMatchObject({ outcome: 'pass' });
+    expect(later.status).toBe('complete');
+    expect(later.summary.verdict).toBe('green');
+  });
+
+  it('a fail that lands while another order is still pending turns the verdict red at once', async () => {
+    const blacklist = new FakeProvider('fa', { kind: 'pending', orderReference: 'a1' }, [service({ providerId: 'fa', serviceId: 'bl', async: true })]);
+    blacklist.pollOutcomes = [{ kind: 'answered', fields: [{ field: 'blacklist.status', value: 'blocked' }], misses: [] }];
+    const lock = new FakeProvider('fb', { kind: 'pending', orderReference: 'b1' }, [
+      service({ providerId: 'fb', serviceId: 'al', async: true, capabilities: ['lock.activation'], fields: ['lock.activation.status'] }),
+    ]);
+    lock.pollOutcomes = [{ kind: 'pending', orderReference: 'b1' }];
+    const h = await makePaidApp({ providers: [blacklist, lock], deepWaitMs: 300, pollIntervalMs: 10 });
+
+    const report = (await post(h, '/v1/deep_checks', { imei: SENTINEL, capabilities: ['blacklist.gsma', 'lock.activation'] })).json<CheckReport>();
+    expect(report.sections['blacklist.gsma']?.outcome).toBe('fail');
+    expect(report.status).toBe('partial');
+    // A `fail` under an amber summary is the one inconsistency a buyer must never see.
+    expect(report.summary.verdict).toBe('red');
+    expect((await get(h, report.check_id)).summary.verdict).toBe('red');
+  });
+});

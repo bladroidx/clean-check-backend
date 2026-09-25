@@ -4,6 +4,7 @@ import {
   SCHEMA_VERSION,
   assertEnvelopeInvariants,
   deriveVerdict,
+  inconclusive,
   unavailable,
   type Capability,
   type CheckReport,
@@ -196,6 +197,7 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
     for (const capability of capabilities) {
       if (!DERIVED_CAPABILITIES.includes(capability)) continue;
       const purchase = resolvedFields.get('warranty.purchase_date');
+      const purchaseSection = sections.get('warranty.purchase_date');
       const coverage = coverageFor(capability, deps.tacDirectory);
       record(
         capability,
@@ -205,7 +207,22 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
               coverage,
               checkedAt: startedAt,
             })
-          : unavailable({
+          : // The purchase date is an async order still running (every imei24 purchase-date
+            // service is): the fact this is derived from is on its way, so it waits with it, and
+            // settlement re-derives it when the date lands (final review F4). Saying "not
+            // supported for this device" here would be false.
+            purchaseSection?.outcome === 'inconclusive' && purchaseSection.reason === 'awaiting_provider'
+            ? inconclusive({
+                capability,
+                checkedAt: startedAt,
+                coverage,
+                reason: 'awaiting_provider',
+                remedy: 'retry_later',
+                detail:
+                  'Warranty status is derived from the purchase date, which the supplier has not ' +
+                  'returned yet. Poll GET /v1/deep_checks/{check_id}.',
+              })
+            : unavailable({
               capability,
               checkedAt: startedAt,
               coverage,

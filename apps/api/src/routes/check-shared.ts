@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   DISCLAIMER,
   SCHEMA_VERSION,
+  deriveVerdict,
   type Capability,
   type CheckReport,
 } from '@imei-check/contract';
@@ -200,7 +201,10 @@ export async function reportFromRecord(services: AppServices, record: CheckSumma
     completed_at: record.completedAt?.toISOString() ?? null,
     sections,
     summary: {
-      verdict: record.verdict ?? 'undetermined',
+      // Derived from the stored sections, never read back from the column: sections land one at a
+      // time (poll, webhook, wait window) and a verdict that lags them could show a `fail` section
+      // under an amber summary (final review F5). Same function the POST used, same answer.
+      verdict: deriveVerdict(list).verdict,
       reasons: reasonsFor(list),
       sections_unavailable: stored.filter((s) => s.outcome === 'unavailable').map((s) => s.capability),
     },

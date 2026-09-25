@@ -7,6 +7,7 @@ import type { OrderRow, Repositories } from '../src/db/types.js';
 import { Metrics } from '../src/metrics.js';
 import { backoffFor, pollDueOrders, pollOrders } from '../src/orders/settle.js';
 import { coverageFor } from '../src/report/coverage.js';
+import { assembleSection } from '../src/report/assemble.js';
 
 const s486: CatalogueService = {
   serviceId: '486',
@@ -216,6 +217,8 @@ describe('pollDueOrders / pollOrders (shared order settlement)', () => {
     expect(polled).toBe(false);
     const sections = await repos.checks.sections('chk_1');
     expect(sections[0]?.outcome).toBe('unavailable');
+    // Spec section 5 / R14: the honest reason is that we gave up WAITING, not a supplier timeout.
+    expect(sections[0]?.section).toMatchObject({ outcome: 'unavailable', reason: 'awaiting_provider_timed_out' });
   });
 
   it('advanceBackoff: false (the API wait window) leaves attempts and nextPollAt untouched', async () => {
@@ -320,6 +323,116 @@ describe('pollDueOrders / pollOrders (shared order settlement)', () => {
     const sections = await repos.checks.sections('chk_1');
     expect(sections.map((x) => x.capability).sort()).toEqual(['blacklist.gsma', 'lock.carrier']);
     expect((await repos.checks.byId('t1', 'chk_1'))?.status).toBe('complete');
+  });
+
+  /**
+   * Final review F5: the verdict was only recomputed once no order was left open, so a `fail`
+   * landing while another order was still pending sat under the provisional `amber`.
+   */
+  it('recomputes the verdict on EVERY settle, not only once the check is complete', async () => {
+    const repos = new MemoryRepositories();
+    const blacklistRow = order();
+    const carrierRow = order({ id: 'ord_2', referenceId: 'ref_2', orderReference: 'supplier_2', capability: 'lock.carrier' });
+    await seed(repos, blacklistRow);
+    await repos.orders.insert(carrierRow);
+    await repos.checks.update('chk_1', { verdict: 'amber' });
+    const provider: Provider = {
+      id: 'imei24',
+      catalogue: () => [s486],
+      supports: () => s486,
+      execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+      poll: async () =>
+        ({ kind: 'answered', fields: [{ field: 'blacklist.status', value: 'blocked' }], misses: [] }) as const,
+    };
+
+    await pollOrders(
+      { repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now },
+      [blacklistRow],
+    );
+
+    const check = await repos.checks.byId('t1', 'chk_1');
+    expect(check?.status).toBe('partial');
+    expect(check?.verdict).toBe('red');
+  });
+
+  /**
+   * Final review F4: `warranty.status` is derived from `warranty.purchase_date`. On the deep route
+   * the purchase date is always an async order, so the derived section has to wait for it -- and
+   * be re-derived when it lands, rather than staying whatever it was at placement.
+   */
+  describe('warranty.status follows its purchase date', () => {
+    const sWarranty: CatalogueService = {
+      ...s486,
+      serviceId: '428',
+      capabilities: ['warranty.purchase_date'],
+      fields: ['warranty.purchase_date'],
+    };
+    const purchaseRow = () => order({ serviceId: '428', capability: 'warranty.purchase_date' });
+
+    async function seedAwaiting(repos: Repositories, row: OrderRow): Promise<void> {
+      await seed(repos, row);
+      const awaiting = assembleSection({
+        capability: 'warranty.status',
+        outcome: { kind: 'pending', orderReference: 'supplier_1' },
+        coverage: coverageFor('warranty.status', emptyTac),
+        checkedAt: new Date('2026-09-13T00:00:00Z'),
+      });
+      await repos.checks.putSection({ checkId: 'chk_1', capability: 'warranty.status', outcome: awaiting.outcome, section: awaiting });
+    }
+
+    const pollWith = (outcome: ProviderOutcome): Provider => ({
+      id: 'imei24',
+      catalogue: () => [sWarranty],
+      supports: () => sWarranty,
+      execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+      poll: async () => outcome,
+    });
+
+    const warranty = async (repos: Repositories) =>
+      (await repos.checks.sections('chk_1')).find((x) => x.capability === 'warranty.status')?.section;
+
+    it('is re-derived from the purchase date when it settles', async () => {
+      const repos = new MemoryRepositories();
+      const row = purchaseRow();
+      await seedAwaiting(repos, row);
+      const provider = pollWith({
+        kind: 'answered',
+        fields: [{ field: 'warranty.purchase_date', value: '2026-03-01T00:00:00.000Z' }],
+        misses: [],
+      });
+
+      await pollOrders({ repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now }, [row]);
+
+      expect(await warranty(repos)).toMatchObject({
+        outcome: 'pass',
+        evidence: expect.arrayContaining([expect.objectContaining({ label: 'Purchase date' })]),
+      });
+      const check = await repos.checks.byId('t1', 'chk_1');
+      expect(check?.status).toBe('complete');
+      expect(check?.verdict).toBe('green');
+    });
+
+    it('is unavailable when the answer carries no purchase date', async () => {
+      const repos = new MemoryRepositories();
+      const row = purchaseRow();
+      await seedAwaiting(repos, row);
+      await pollOrders(
+        { repos, providers: [pollWith({ kind: 'answered', fields: [], misses: [] })], tacDirectory: emptyTac, metrics: new Metrics(false), now },
+        [row],
+      );
+      expect(await warranty(repos)).toMatchObject({ outcome: 'unavailable', reason: 'capability_not_supported_for_device' });
+    });
+
+    it('times out with its purchase date', async () => {
+      const repos = new MemoryRepositories();
+      const row = { ...purchaseRow(), expiresAt: new Date('2026-09-13T00:30:00Z') };
+      await seedAwaiting(repos, row);
+      await pollOrders(
+        { repos, providers: [pollWith({ kind: 'pending', orderReference: 'x' })], tacDirectory: emptyTac, metrics: new Metrics(false), now },
+        [row],
+      );
+      expect(await warranty(repos)).toMatchObject({ outcome: 'unavailable', reason: 'awaiting_provider_timed_out' });
+    });
   });
 
   it('backs off exponentially with a cap', () => {
