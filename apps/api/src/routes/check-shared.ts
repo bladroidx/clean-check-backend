@@ -234,10 +234,24 @@ export async function getCheck(
   return reply.code(200).send(await reportFromRecord(services, record));
 }
 
-/** Ties the provider calls to the client connection: a hung-up caller stops costing us money. */
-export function toSignal(raw: { destroyed?: boolean; on?: (e: string, cb: () => void) => unknown }): AbortSignal {
+/**
+ * Ties the provider calls to the client connection: a hung-up caller stops costing us money.
+ *
+ * Takes the RESPONSE (`reply.raw`), never the request. Node marks the request destroyed as soon
+ * as its body has been read -- which Fastify does before any handler runs -- so reading
+ * `request.raw.destroyed` as "the client hung up" aborted every POST on arrival: every deep check
+ * came back `unavailable(provider_timeout)` without ever placing an order. The response's `close`
+ * fires on completion AND on a dropped connection; only the second has `writableFinished` false.
+ */
+export function toSignal(res: {
+  destroyed?: boolean;
+  writableFinished?: boolean;
+  once?: (e: string, cb: () => void) => unknown;
+}): AbortSignal {
   const controller = new AbortController();
-  if (raw.destroyed === true) controller.abort();
-  else raw.on?.('aborted', () => controller.abort());
+  if (res.destroyed === true) controller.abort();
+  else res.once?.('close', () => {
+    if (res.writableFinished !== true) controller.abort();
+  });
   return controller.signal;
 }

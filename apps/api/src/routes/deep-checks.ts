@@ -77,7 +77,7 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
           () => controller.abort(),
           Math.max(0, startedAt + services.deepWaitMs - Date.now()),
         );
-        const hangup = toSignal(request.raw);
+        const hangup = toSignal(reply.raw);
         if (hangup.aborted) controller.abort();
         else hangup.addEventListener('abort', () => controller.abort(), { once: true });
         try {

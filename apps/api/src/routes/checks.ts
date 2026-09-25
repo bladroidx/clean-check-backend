@@ -72,7 +72,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
                 capabilities,
                 maxAgeSeconds: request.body.max_age_seconds,
                 idempotencyKey: ctx.idempotencyKey,
-                signal: toSignal(request.raw),
+                signal: toSignal(reply.raw),
               },
             ),
         });
