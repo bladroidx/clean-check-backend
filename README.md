@@ -47,7 +47,9 @@ curl -s -X POST localhost:3000/v1/imei/validate \
 
 Interactive docs at `/docs`, generated OpenAPI at `/openapi.json`.
 
-For the paid path, add a database — the paid routes appear only when `DATABASE_URL` is set:
+For the check routes, add a database — every `/v1/checks`, `/v1/deep_checks` and
+`/v1/capabilities` route (the free `POST /v1/checks` included) appears only when `DATABASE_URL` is
+set:
 
 ```bash
 docker compose up --build              # Postgres + migrations + API + worker
@@ -91,7 +93,24 @@ above, billing removed entirely (nothing is ever charged):
 - `GET /metrics` — Prometheus.
 
 Supplier credentials are optional even here. With none configured, deep-check sections come back
-`unavailable(provider_not_configured)` and every contract guarantee still holds.
+`unavailable(provider_not_configured)` and every contract guarantee still holds. They are both or
+neither: setting only one of `IMEI24_USERNAME` / `IMEI24_API_KEY` refuses to boot (API and
+worker), because half a credential is a typo, not a mode.
+
+### Before deploying this branch (release blockers outside this repo)
+
+These are not code in this repository, and shipping without them is a real-money or broken-client
+incident. Spec: `docs/superpowers/specs/2026-09-25-deep-checks-imei24-design.md` §8.
+
+1. **Deploy order — check-this-phone-backend first (§8.4).** Its paid `POST /checks` forwards to
+   `/v1/checks` and charges the user a credit. After this deploy `/v1/checks` is the FREE offline
+   tier, so that backend would charge users for an answer that bought nothing. It must repoint its
+   paid route to `POST /v1/deep_checks` (and `GET /v1/deep_checks/:id` for polling), and proxy
+   `/v1/checks` as a free route, **before or together with** this deploy.
+2. **Android must tolerate the new `Reason` arms (§8.5).** This branch adds `requires_deep_check`
+   and `spend_cap_reached`. The app's `CleanCheckWire.kt` deserialiser is exhaustive; confirm it
+   tolerates an unknown `Reason` (or ship the app-side tolerance first) before any client can
+   receive one. Run `/contract` before release.
 
 ## Layout
 

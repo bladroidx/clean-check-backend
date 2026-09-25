@@ -116,10 +116,18 @@ apps/api/src/orchestrator/
   │   1. identity.model?        → answer from the in-memory TacDirectory. Free.
   │   2. Otherwise → check packages/core/src/cache/store.ts first (keyed on the field, not the
   │      whole response — see ADR-0004).
-  │   3. Cache miss → packages/providers' Router picks the cheapest provider that covers this
-  │      TAC for this capability, executes it (or fails over — but ONLY on transport failure,
-  │      never after a definite answer; see §6). No affordability gating: billing is off, so
-  │      every requested capability simply runs. Every provider is wrapped in
+  │   3. Cache miss → packages/providers' `Router.plan` covers what is left with the FEWEST
+  │      services (greedy set cover — one Apple all-in-one is one order, not four, and imei24
+  │      charges every repeat), ranking ties brand-specific first (by TAC directory
+  │      manufacturer), then cheapest. Per planned service: attach to an order already open for
+  │      this IMEI, or place one — the attach/cache check is repeated INSIDE the supplier lock
+  │      just before sending, so two concurrent checks for one device buy once (R17). Failover
+  │      happens ONLY on a transport failure, never after a definite answer (see §6), and only
+  │      to a DIFFERENT supplier unless the failure provably never left us or was `rate_limited`
+  │      — after a timeout the order may exist and be paid for (R18). A failure that may have
+  │      been sent keeps its catalogue cost, so the spend cap counts it. No affordability
+  │      gating: billing is off, so every requested capability simply runs. Every provider is
+  │      wrapped in
   │      `GuardedProvider` (`packages/core`): one imei24 job at a time (an advisory lock —
   │      imei24 refuses concurrent orders), and today's spend against `IMEI24_DAILY_SPEND_USD`
   │      (default $10) — over the cap comes back `unavailable(spend_cap_reached)`, not a silent
@@ -325,11 +333,13 @@ can help sell a stolen phone and isn't.
 
 ## 11. Non-obvious things that will trip you up
 
-- **The paid routes don't exist unless `DATABASE_URL` is set.** `apps/api/src/app.ts` only
-  registers `checkRoutes`/`providerFeedbackRoutes`/`/metrics` when a `services` object is passed
-  in. Running without a database is a *supported* mode (the free tier), not a broken one — but the
-  failure mode is a plain 404 on every paid route, which reads exactly like a routing bug until you
-  remember this. `npm run dev` and `npm run start` load `.env` from the repo root automatically
+- **The check routes don't exist unless `DATABASE_URL` is set — the FREE `POST /v1/checks`
+  included, not just the deep ones.** `apps/api/src/app.ts` only registers `checkRoutes` (free
+  `/v1/checks`, `/v1/capabilities`), `deepCheckRoutes`, `providerFeedbackRoutes`, `adminRoutes`
+  and `/metrics` when a `services` object is passed in; without one, only `/v1/imei/validate`,
+  `/v1/tac/:tac`, `/v1/attributions` and the health/docs routes exist. Running without a database
+  is a *supported* mode, not a broken one — but the failure mode is a plain 404 on every check
+  route, which reads exactly like a routing bug until you remember this. `npm run dev` and `npm run start` load `.env` from the repo root automatically
   (`node --env-file-if-exists=.env`, wired into `apps/api/package.json` and
   `apps/worker/package.json`) — copy `.env.example` once and this stops being something you have to
   remember per shell session. **This does not run in Docker**: the image's `CMD` invokes
