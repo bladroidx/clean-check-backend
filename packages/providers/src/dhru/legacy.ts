@@ -30,6 +30,12 @@ import { fieldValues } from './assemble-fields.js';
  *    looks like `{"STATUS":"error","MESSAGE":"..."}` at the top level, and one specific message --
  *    the one-job-at-a-time refusal -- names no device at all, so it must be classified as a
  *    transport-level `rate_limited` failure rather than a rejection or, worse, an answer.
+ * 4. **The standard `placeimeiorder` success is an acknowledgement, not an answer.**
+ *    `{"SUCCESS":[{"MESSAGE":"Order received","REFERENCEID":"…"}]}` has no STATUS and no result.
+ *    Read as an answer it yields zero fields: the order we paid for is never polled and the next
+ *    check buys it again. So a SUCCESS with a REFERENCEID, no order STATUS and nothing parseable
+ *    is `pending(REFERENCEID)` for every service, sync or not (ruling R16) -- a poll is cheap, a
+ *    discarded paid order is not.
  */
 
 export interface DhruLegacyConfig {
@@ -190,9 +196,18 @@ export class DhruLegacyProvider implements Provider {
       };
     }
 
+    // Point 4 above: the standard placement acknowledgement has no STATUS and no result, only a
+    // REFERENCEID. Anything with no parseable result below is that order still running.
+    const placedReference =
+      status.length === 0 ? String(record['REFERENCEID'] ?? record['referenceid'] ?? '') : '';
+    const placed: ProviderOutcome | undefined =
+      placedReference.length > 0
+        ? { kind: 'pending', orderReference: placedReference, providerCostUsd: service.costUsd }
+        : undefined;
+
     const blob = record['RESULT'] ?? record['result'] ?? record['MESSAGE'];
     if (typeof blob !== 'string' || blob.trim().length === 0) {
-      return { kind: 'failed', reason: 'malformed_response', detail: 'provider returned an empty result' };
+      return placed ?? { kind: 'failed', reason: 'malformed_response', detail: 'provider returned an empty result' };
     }
 
     const lexicon = this.config.lexicons.find(
@@ -208,6 +223,9 @@ export class DhruLegacyProvider implements Provider {
     }
 
     const { values, misses } = normalise(lexicon, extractPairs(blob));
+    // "Order received" normalises to nothing at all -- not a miss, not a field. With a REFERENCEID
+    // that is a placed order to poll; read as an answer it would be an empty (paid) non-answer.
+    if (placed !== undefined && values.size === 0 && misses.length === 0) return placed;
     return {
       kind: 'answered',
       fields: fieldValues(values, service.fields),

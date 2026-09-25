@@ -78,3 +78,35 @@ describe('imei24 lexicons ship with no known-good phrases', () => {
     expect(outcome.misses.map((m) => m.field)).not.toContain('blacklist.status');
   });
 });
+
+/**
+ * Final review F1 / R16: the standard DHRU `placeimeiorder` acknowledgement.
+ *
+ * `{"SUCCESS":[{"MESSAGE":"Order received","REFERENCEID":"…"}]}` carries no STATUS and no result.
+ * Read as an answer, it normalises to zero fields -> `inconclusive(device_not_found_in_registry)`,
+ * the paid order reference is thrown away, never polled, and the next check buys it again.
+ */
+describe('imei24 order placement', () => {
+  it('a placement acknowledgement is pending on its REFERENCEID, not an empty answer', () => {
+    for (const id of ['486', '428']) {
+      expect(provider.interpret(body('placement-order-received.json'), svc(id))).toMatchObject({
+        kind: 'pending',
+        orderReference: '71970',
+      });
+    }
+  });
+
+  it('a SUCCESS that carries a REFERENCEID AND a parseable result is still an answer', () => {
+    const answered = JSON.stringify({
+      SUCCESS: [{ REFERENCEID: '71971', RESULT: 'Model;iPhone 13\nBlacklist Status;Blacklisted\n' }],
+    });
+    const outcome = provider.interpret(answered, svc('486'));
+    if (outcome.kind !== 'answered') throw new Error('unexpected ' + outcome.kind);
+    expect(outcome.fields).toContainEqual(expect.objectContaining({ field: 'blacklist.status', value: 'blocked' }));
+  });
+
+  it('a SUCCESS with no REFERENCEID and no result stays a no-field answer (unchanged)', () => {
+    const outcome = provider.interpret(JSON.stringify({ SUCCESS: [{ MESSAGE: 'Order received' }] }), svc('486'));
+    expect(outcome).toMatchObject({ kind: 'answered', fields: [] });
+  });
+});
