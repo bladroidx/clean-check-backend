@@ -35,11 +35,14 @@ describe('ImeiCipher', () => {
     expect(c.decrypt(old.ciphertext, 1, 'x')).toBe(DIGITS);
   });
   it('refuses a short key and never echoes it', () => {
+    // Without this, a fromKeyring that stopped throwing would skip the catch and pass silently.
+    expect.assertions(2);
     const short = Buffer.alloc(16).toString('base64');
     expect(() => ImeiCipher.fromKeyring(`1:${short}`)).toThrow(/32 bytes/);
     try { ImeiCipher.fromKeyring(`1:${short}`); } catch (e) { expect(String(e)).not.toContain(short); }
   });
   it('error messages never contain digits', () => {
+    expect.assertions(1);
     const c = ImeiCipher.fromKeyring(`1:${k()}`);
     try { c.decrypt(Buffer.alloc(40), 1, 'x'); } catch (e) { expect(String(e)).not.toMatch(/\d{14,}/); }
   });

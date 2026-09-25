@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CheckReport } from '@imei-check/contract';
 import { SENTINEL } from './helpers.js';
 import { idempotencyKey, makePaidApp, type PaidHarness } from './paid-helpers.js';
@@ -72,9 +72,13 @@ describe('POST /v1/admin/checks/:id/imei/reveal', () => {
     h.repos.reveals.record = async () => {
       throw new Error('db down');
     };
+    // The claim is "nothing is DECRYPTED", not merely "nothing is returned": spy on the cipher.
+    const decrypt = vi.spyOn(h.services.cipher, 'decrypt');
     const res = await reveal(h, check.check_id, h.adminAuth(), 'customer dispute #42 needs device id');
     expect(res.statusCode).toBe(500);
     expect(res.body).not.toContain(SENTINEL);
+    expect(decrypt).not.toHaveBeenCalled();
+    decrypt.mockRestore();
   });
 
   it('a pre-ADR-0007 check says not stored, not 500', async () => {
@@ -110,6 +114,23 @@ describe('POST /v1/admin/checks/:id/imei/reveal', () => {
     const [row] = await h.repos.reveals.forCheck(check.check_id);
     expect(row?.reason).not.toContain(SENTINEL);
     expect(row?.reason).toContain('[REDACTED-IMEI]');
+  });
+
+  it('R19: an IMEI typed with spaces or hyphens in the reason is scrubbed too', async () => {
+    const h = await makePaidApp();
+    const check = (await postFree(h)).json<CheckReport>();
+    // Built from SENTINEL, never written out: "AA BBBBBB CCCCCC D" and "AA-BBBBBB-CCCCCC-D".
+    const grouped = (sep: string) => SENTINEL.replace(/^(\d{2})(\d{6})(\d{6})(\d)$/, `$1${sep}$2${sep}$3${sep}$4`);
+    for (const typed of [grouped(' '), grouped('-'), grouped(' - ')]) {
+      const res = await reveal(h, check.check_id, h.adminAuth(), `owner read it out as ${typed} on the phone`);
+      expect(res.statusCode).toBe(200);
+    }
+    const rows = await h.repos.reveals.forCheck(check.check_id);
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.reason.replace(/[\s-]/g, '')).not.toContain(SENTINEL);
+      expect(row.reason).toContain('[REDACTED-IMEI]');
+    }
   });
 
   it('reason under 10 chars is 400', async () => {

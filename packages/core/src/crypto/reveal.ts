@@ -32,6 +32,18 @@ export interface RevealImeiArgs {
   readonly reason: string;
 }
 
+/**
+ * A person reading an IMEI aloud or off a box types it grouped -- `35 310411 234567 6`,
+ * `35-310411-234567-6` -- and the provider scrubber only knows unbroken digit runs. So digit runs
+ * of IMEI length (14+ digits) broken only by spaces or hyphens are redacted first, then the plain
+ * rule runs. A date or a ticket number is far too short to match.
+ */
+const SEPARATED_IMEI = /(?<!\d)\d(?:[ \t-]*\d){13,}(?!\d)/g;
+
+export function scrubReason(reason: string): string {
+  return scrub(reason.replace(SEPARATED_IMEI, '[REDACTED-IMEI]'));
+}
+
 export async function revealImei(deps: RevealImeiDeps, args: RevealImeiArgs): Promise<RevealResult> {
   const check = await deps.repos.checks.byId(args.tenantId, args.checkId);
   if (check === undefined) return { kind: 'not_found' };
@@ -44,13 +56,13 @@ export async function revealImei(deps: RevealImeiDeps, args: RevealImeiArgs): Pr
   //
   // The reason is free text a caller typed, and free text is exactly where a raw IMEI leaks in --
   // "reveal because <the device's IMEI> was reported stolen" would otherwise sit in `imei_reveals`
-  // forever. Scrub it with the same IMEI-shaped-digit-run rule the providers use before it is ever
-  // written, not after.
+  // forever. Scrub it -- the providers' IMEI-shaped-digit-run rule, plus grouped forms -- before it
+  // is ever written, not after.
   await deps.repos.reveals.record({
     id: `rev_${randomUUID()}`,
     checkId: args.checkId,
     actor: args.actor,
-    reason: scrub(args.reason),
+    reason: scrubReason(args.reason),
     revealedAt: (deps.now ?? (() => new Date()))(),
   });
 

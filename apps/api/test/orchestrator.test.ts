@@ -166,6 +166,36 @@ describe('capabilities preview', () => {
     expect(provider.executed).toEqual([]);
   });
 
+  /**
+   * R19: warranty.status is derived from a purchase date. With no service that sells one for this
+   * device it cannot be answered, and the preview must say so rather than advertise it.
+   */
+  it('reports warranty.status unavailable when nothing sells a purchase date for the device', async () => {
+    const preview = async (providers: FakeProvider[]) => {
+      const harness = await makePaidApp({ providers });
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/v1/capabilities',
+        headers: harness.auth(),
+        payload: { imei: SENTINEL },
+      });
+      return response.json().capabilities.find((c: { capability: string }) => c.capability === 'warranty.status');
+    };
+
+    // Blacklist only: no purchase date anywhere.
+    expect(await preview([new FakeProvider('fake', CLEAN)])).toMatchObject({
+      available: false,
+      reason: 'provider_no_coverage',
+    });
+
+    const withDate = new FakeProvider('fake', CLEAN, [
+      service({ providerId: 'fake', serviceId: 'w', capabilities: ['warranty.purchase_date'], fields: ['warranty.purchase_date'], costUsd: 0.1 }),
+    ]);
+    const covered = await preview([withDate]);
+    expect(covered).toMatchObject({ available: true, cost_usd: 0.1 });
+    expect(covered.reason).toBeUndefined();
+  });
+
   it('rejects an invalid IMEI', async () => {
     const harness = await makePaidApp();
     const response = await harness.app.inject({

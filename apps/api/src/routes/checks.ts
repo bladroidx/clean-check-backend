@@ -139,21 +139,22 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
           });
           const offline = OFFLINE_CAPABILITIES.includes(capability);
           const derived = capability === 'warranty.status';
+          // What actually has to be bought: for the derived one, the purchase date it needs. With
+          // no service selling that date for this device, warranty status cannot be answered
+          // either, and advertising it as available would promise a section that is always
+          // `unavailable` (R19).
+          const sources = derived
+            ? services.router.candidates('warranty.purchase_date', tac, manufacturer)
+            : candidates;
+          const available = offline || sources.length > 0;
           capabilities.push({
             capability,
-            available: offline || derived || candidates.length > 0,
+            available,
             credits: 0,
             // Derived is still deep: warranty status needs a purchase date, which is bought.
             tier: offline ? ('free' as const) : ('deep' as const),
-            // What a deep check would spend on it: for the derived one, the purchase date it needs.
-            cost_usd: offline
-              ? 0
-              : (derived
-                ? services.router.candidates('warranty.purchase_date', tac, manufacturer)
-                : candidates)[0]?.service.costUsd ?? 0,
-            ...(candidates.length === 0 && !offline && !derived
-              ? { reason: 'provider_no_coverage' as const }
-              : {}),
+            cost_usd: offline ? 0 : (sources[0]?.service.costUsd ?? 0),
+            ...(!available ? { reason: 'provider_no_coverage' as const } : {}),
             cached: cachedFields.length > 0,
           });
         }
