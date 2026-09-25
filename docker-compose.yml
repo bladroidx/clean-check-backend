@@ -1,5 +1,7 @@
-# Development stack. The mock-provider container lands in M1 so the whole thing stays exercisable
-# without spending a credit.
+# Development stack. No supplier credentials here, so deep sections come back
+# unavailable(provider_not_configured) and nothing is ever spent. For a production-like stack with a
+# fake imei24 (tools/fake-imei24) and the check-this-phone backend in front, see
+# ../check-this-phone/check-this-phone-backend/local-stack/.
 services:
   postgres:
     image: postgres:17-alpine
@@ -23,8 +25,9 @@ services:
       postgres: { condition: service_healthy }
     environment:
       DATABASE_URL: postgres://imei:imei@postgres:5432/imei_check?sslmode=disable
-    volumes: ['./db:/db']
-    command: ['--wait', 'up']
+    # Read-only, and no schema dump: `dbmate up` would otherwise rewrite db/schema.sql in the repo.
+    volumes: ['./db:/db:ro']
+    command: ['--wait', '--no-dump-schema', 'up']
 
   api:
     build: .
@@ -37,6 +40,9 @@ services:
       # Development value only. Production reads this from the platform secret store.
       SERVER_PEPPER: dev-pepper-not-for-production-0123456789
       DATABASE_URL: postgres://imei:imei@postgres:5432/imei_check?sslmode=disable
+      # Development value only (ADR-0007). Required once DATABASE_URL is set, or the api refuses to
+      # boot. Production reads it from the secret store, apart from the database backups.
+      IMEI_ENCRYPTION_KEYS: '1:ZGV2LW9ubHktbm90LWZvci1wcm9kdWN0aW9uLWtleSE='
       # Where an async supplier POSTs its answer back to. Inside compose that is the api service.
       PUBLIC_BASE_URL: http://api:3000
     ports: ['3000:3000']

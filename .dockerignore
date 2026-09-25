@@ -1,0 +1,19 @@
+# The build stage runs `npm ci` and then `COPY . .`. Without this file that copy lays the host's
+# node_modules over the clean install, lets a stale host *.tsbuildinfo make `tsc --build` skip the
+# compile (shipping whatever the host last built), and carries the real .env into the image.
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+coverage
+.env
+.env.*
+!.env.example
+.git
+.claude
+.superpowers
+bruno
+db/schema.sql
+# The fake supplier builds from its own context (tools/fake-imei24); the service image never
+# contains it.
+tools
