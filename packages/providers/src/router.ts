@@ -29,7 +29,7 @@ function ranked(a: { service: CatalogueService }, b: { service: CatalogueService
   return specificity(b.service) - specificity(a.service) || a.service.costUsd - b.service.costUsd;
 }
 
-/** Failure reasons produced by our own guards, not by the supplier. See `runCall`. */
+/** Failure reasons that never count against a supplier's breaker. See the comment in `runCall`. */
 const OUR_OWN_REFUSALS: ReadonlySet<FailureReason> = new Set(['rate_limited', 'spend_cap_reached']);
 
 /**
@@ -223,6 +223,12 @@ export class Router {
     let lastService: CatalogueService | undefined;
 
     for (const [index, candidate] of candidates.entries()) {
+      // The caller's budget is spent (or it hung up): do not start another leg -- and above all
+      // do not write a provider_calls row for a purchase we are not going to make.
+      if (args.signal.aborted) {
+        last = { kind: 'failed', reason: 'timeout', detail: 'Not attempted: the time budget was spent.' };
+        break;
+      }
       const breaker = this.options.breakers.get(candidate.provider.id);
       lastService = candidate.service;
 
@@ -247,13 +253,21 @@ export class Router {
       const outcome = await this.execute(candidate, { capability, imeiDigits: args.imeiDigits, signal: args.signal }, attemptId);
       const finishedAt = now();
 
-      // `rate_limited` (our own cross-process lock was busy) and `spend_cap_reached` (our own
-      // budget) are refusals WE made before any request left the building. Counting them against
-      // the supplier would open its circuit on a busy afternoon and then fail every check for the
-      // cool-down -- a self-inflicted outage blamed on someone else. They stay `failed` outcomes
-      // (no field, never a pass); they just say nothing about the supplier's health either way.
+      // Three kinds of `failed` say nothing about the supplier's health, so they never count
+      // toward opening its circuit:
+      //
+      // - `spend_cap_reached`: our own daily budget refused the call.
+      // - `rate_limited`: our own cross-process lock was busy -- AND, deliberately, the same
+      //   reason from the supplier side (an HTTP 429, or imei24's "APIKEY is working in other
+      //   session"). Both mean "one job at a time", i.e. contention with our OWN other process,
+      //   not an outage; opening the circuit on it would turn a busy afternoon into a cool-down
+      //   of failed checks.
+      // - anything after the caller's own signal aborted (client hang-up or the deep-check time
+      //   budget): the failure is ours, not theirs.
+      //
+      // They stay `failed` outcomes -- no field, never a pass.
       if (outcome.kind === 'failed') {
-        if (!OUR_OWN_REFUSALS.has(outcome.reason)) breaker.recordFailure();
+        if (!OUR_OWN_REFUSALS.has(outcome.reason) && !args.signal.aborted) breaker.recordFailure();
       } else breaker.recordSuccess();
 
       const attempt: Attempt = {

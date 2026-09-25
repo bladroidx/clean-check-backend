@@ -189,6 +189,46 @@ describe('failover', () => {
     expect(breakers.get('a').isOpen()).toBe(true);
   });
 
+  it('places nothing, and writes no provider_calls row, once the caller signal has aborted', async () => {
+    const started: string[] = [];
+    const a = new FakeProvider('a', CLEAN);
+    const router = new Router({
+      providers: [a],
+      breakers: new BreakerRegistry(),
+      hooks: { onCallStart: (x) => void started.push(x.attemptId) },
+    });
+    const { calls } = router.plan(['blacklist.gsma'], '35310411');
+    const call = calls[0];
+    if (call === undefined) throw new Error('expected a planned call');
+    const result = await router.runCall({ call, imeiDigits: 'x', signal: AbortSignal.abort() });
+    expect(a.calls).toEqual([]);
+    expect(started).toEqual([]);
+    expect(result.outcome.kind).toBe('failed');
+  });
+
+  it('a failure after the caller signal aborted is ours, not the supplier breaker', async () => {
+    const breakers = new BreakerRegistry();
+    let controller = new AbortController();
+    // Aborts mid-call, as the deep-check budget does.
+    class AbortsMidCall extends FakeProvider {
+      override async execute(request: ExecuteRequest): Promise<ProviderOutcome> {
+        controller.abort();
+        return super.execute(request);
+      }
+    }
+    const provider = new AbortsMidCall('a', FAILED);
+    const router = new Router({ providers: [provider], breakers });
+    for (let i = 0; i < 10; i += 1) {
+      controller = new AbortController();
+      const { calls } = router.plan(['blacklist.gsma'], '35310411');
+      const call = calls[0];
+      if (call === undefined) throw new Error('expected a planned call');
+      await router.runCall({ call, imeiDigits: 'x', signal: controller.signal });
+    }
+    expect(provider.calls).toHaveLength(10);
+    expect(breakers.get('a').isOpen()).toBe(false);
+  });
+
   it('records provider_calls BEFORE the request is made', async () => {
     const order: string[] = [];
     const provider: Provider = {
