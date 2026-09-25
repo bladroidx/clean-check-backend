@@ -43,13 +43,14 @@ example or evidence blob. What changes: one column may hold the IMEI **encrypted
 
 | Scope | Allows |
 |---|---|
-| `checks` | `/v1/checks*`, `/v1/deep_checks*`, `/v1/capabilities`, free routes |
+| `checks:write` | `/v1/checks*`, `/v1/deep_checks*`, `/v1/capabilities`, free routes |
 | `imei:reveal` | `POST /v1/admin/checks/:id/imei/reveal` only |
 
-A key has exactly one of them. The service key (check-this-phone-backend) is `checks` and gets
-**403** on the reveal route; the admin key is `imei:reveal` and gets 403 on everything else.
-Migration backfills existing keys to `{checks}`. New script `npm run seed:admin-key` mints the
-admin key.
+`checks:write` is the scope the seed scripts already mint; the service key's existing `imei:read`
+grants nothing and never will. The service key (check-this-phone-backend) gets **403** on the
+reveal route; the admin key holds only `imei:reveal` and gets 403 on everything else. A key
+holding both `checks:write` and `imei:reveal` is refused at auth. New script
+`npm run seed:admin-key` mints the admin key. No backfill is needed.
 
 Two ways to reveal, one code path:
 
@@ -82,5 +83,5 @@ DSAR erasure: null `imei_encrypted` for rows matching the hash.
 - `docs/privacy.md` must say IMEIs are stored encrypted for the retention window, and why.
 - The sentinel test changes: it must still find **no plaintext** sentinel digits anywhere in the
   DB, logs or responses (other than the reveal response), and must additionally prove the reveal
-  route writes an audit row and is refused to a `checks`-scoped key.
+  route writes an audit row and is refused to a `checks:write` key.
 - Losing `IMEI_ENCRYPTION_KEY` makes stored IMEIs unrecoverable (hashes and reports unaffected).

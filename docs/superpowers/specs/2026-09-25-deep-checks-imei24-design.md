@@ -50,7 +50,8 @@ authorised).
   `unavailable(requires_deep_check)`, not dropped, not an error.
 - An offline capability (`identity.model`) requested on `/v1/deep_checks` → **400**
   `capability_not_in_tier`. Deep reports are paid-only; the client merges.
-- Idempotency records are scoped per tier; the same key on both routes is not a conflict.
+- Idempotency records are scoped per tier (stored key prefixed `free:` / `deep:`); the same key on
+  both routes is not a conflict. No migration.
 - `checks` rows gain a `tier` column; `GET /v1/checks/:id` only returns `free` rows and
   `GET /v1/deep_checks/:id` only `deep` rows (404 otherwise).
 
@@ -101,11 +102,15 @@ From the price list dated 2026-09-25 (1 credit = 1 USD):
 | service_id | Capabilities | TAC scope | cost_usd | lexicon |
 |---|---|---|---|---|
 | 486 Global Blacklist checker | `blacklist.gsma` | `*` (fallback) | 0.10 | `imei24-blacklist` |
-| 690 Apple warranty / FMI / blacklist / carrier+simlock | `blacklist.gsma`, `lock.activation`, `lock.carrier`, `warranty.status` | Apple | 0.12 | `imei24-apple` |
-| 783 Samsung warranty and blacklist | `blacklist.gsma`, `warranty.status` | Samsung | 0.10 | `imei24-samsung` |
-| 487 Samsung warranty and carrier v1 | `lock.carrier`, `warranty.status` | Samsung | 0.10 | `imei24-samsung` |
+| 690 Apple warranty / FMI / blacklist / carrier+simlock | `blacklist.gsma`, `lock.activation`, `lock.carrier`, `warranty.purchase_date` | Apple | 0.12 | `imei24-apple` |
+| 783 Samsung warranty and blacklist | `blacklist.gsma`, `warranty.purchase_date` | Samsung | 0.10 | `imei24-samsung` |
+| 487 Samsung warranty and carrier v1 | `lock.carrier`, `warranty.purchase_date` | Samsung | 0.10 | `imei24-samsung` |
 | 678 Apple MDM status | `lock.mdm` | Apple | 1.50 | `imei24-mdm` |
-| 428 Motorola, 437 Huawei, 429 LG, 467 Sony, 485 Lenovo, 707 Oppo, 709 Vivo, 488 HTC (warranty) | `warranty.status` | per brand | 0.10 | `imei24-warranty` |
+| 428 Motorola, 437 Huawei, 429 LG, 467 Sony, 485 Lenovo, 707 Oppo, 709 Vivo, 488 HTC (warranty) | `warranty.purchase_date` | per brand | 0.10 | `imei24-warranty` |
+
+`warranty.status` stays DERIVED from `warranty.purchase_date` (never bought, ADR-0004): on the
+deep route, requesting `warranty.status` also fetches `warranty.purchase_date`, and both sections
+are returned.
 
 Brand TAC prefix lists come from the TAC directory's brand field, not hand-typed.
 `credits` is `0` everywhere (billing removed).
@@ -148,7 +153,7 @@ imei24: "You can do ONE JOB in time" — a concurrent call returns
 - Every imei24 HTTP call (place, poll, account) runs under `pg_advisory_lock(<hash of 'imei24'>)`,
   held for one HTTP request only. Shared by API and worker processes.
 - Lock not acquired within the remaining window → `unavailable(rate_limited_upstream)`; nothing
-  placed, no `provider_calls` row.
+  placed. The router's pre-call `provider_calls` row still exists, settled as `failed` at $0.
 - The "other session" message is classified as `rate_limited_upstream` (a rejection, never parsed
   for fields).
 
@@ -184,7 +189,8 @@ Migration (dbmate, expand-only):
 - `idempotency_records`: scope key includes tier.
 - `checks.imei_encrypted bytea`, `checks.imei_key_version int` (nullable: pre-existing rows have
   none). Written for **both** tiers.
-- `api_keys.scopes` enforced; backfill existing keys to `{checks}`.
+- `api_keys.scopes` enforced (`checks:write` / `imei:reveal`); existing keys already hold
+  `checks:write`, no backfill.
 - `imei_reveals` append-only audit table (trigger-enforced).
 - Index for the dedupe lookup on open `provider_orders (imei_hmac, service_id) WHERE status='pending'`
   (CONCURRENTLY).
@@ -204,7 +210,7 @@ Migration (dbmate, expand-only):
 - Sentinel IMEI leak test over imei24 fixtures (IMEI echoed in body).
 - Encryption: round-trip; tampered ciphertext / wrong `check_id` AAD fails; short key refuses
   boot; key rotation reads old version.
-- Reveal: `checks`-scoped key → 403; admin key → 200 + audit row; audit write failure → no
+- Reveal: `checks:write` key → 403; admin key → 200 + audit row; audit write failure → no
   decrypt; admin key on `/v1/checks` → 403; response `no-store` and absent from logs.
 - Sentinel: no plaintext sentinel digits in DB/logs/responses except the reveal response.
 - Contract: OpenAPI diff reviewed; `requires_deep_check` compatibility checked.
