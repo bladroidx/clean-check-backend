@@ -216,6 +216,83 @@ describe('failover', () => {
   });
 });
 
+describe('plan / runCall', () => {
+  const wild = service({ serviceId: '486', capabilities: ['blacklist.gsma'], appliesToTacPrefixes: ['*'], costUsd: 0.1 });
+  const apple = service({
+    serviceId: '690',
+    capabilities: ['blacklist.gsma', 'lock.activation', 'lock.carrier', 'warranty.purchase_date'],
+    fields: ['blacklist.status', 'lock.activation.status', 'lock.carrier.status', 'warranty.purchase_date'],
+    appliesToTacPrefixes: ['353104'],
+    costUsd: 0.12,
+  });
+
+  class MultiServiceProvider implements Provider {
+    readonly executed: string[] = [];
+    constructor(
+      readonly id: string,
+      private readonly services: CatalogueService[],
+      private readonly outcome: ProviderOutcome = CLEAN,
+    ) {}
+    catalogue(): readonly CatalogueService[] {
+      return this.services;
+    }
+    supports(capability: string, tac: string): CatalogueService | undefined {
+      return this.services.find(
+        (s) =>
+          (s.capabilities as readonly string[]).includes(capability) &&
+          s.appliesToTacPrefixes.some((p) => p === '*' || tac.startsWith(p)),
+      );
+    }
+    async execute(request: ExecuteRequest): Promise<ProviderOutcome> {
+      this.executed.push(request.referenceId);
+      return this.outcome;
+    }
+  }
+
+  function routerWith(services: CatalogueService[]): Router {
+    return new Router({ providers: [new MultiServiceProvider('p', services)], breakers: new BreakerRegistry() });
+  }
+
+  function fakeProvider(services: CatalogueService[], outcome: ProviderOutcome): MultiServiceProvider {
+    return new MultiServiceProvider('p', services, outcome);
+  }
+
+  it('one Apple service covers four capabilities in ONE call', () => {
+    const router = routerWith([wild, apple]);
+    const { calls, uncovered } = router.plan(
+      ['blacklist.gsma', 'lock.activation', 'lock.carrier', 'warranty.purchase_date'],
+      '35310411',
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.candidates[0]?.service.serviceId).toBe('690');
+    expect(uncovered).toEqual([]);
+  });
+
+  it('brand-specific beats cheaper wildcard for the same capability', () => {
+    const router = routerWith([wild, { ...apple, costUsd: 0.5 }]);
+    const { calls } = router.plan(['blacklist.gsma'], '35310411');
+    expect(calls[0]?.candidates.map((c) => c.service.serviceId)).toEqual(['690', '486']);
+  });
+
+  it('an unknown TAC falls back to the wildcard and reports the rest as uncovered', () => {
+    const router = routerWith([wild, apple]);
+    const { calls, uncovered } = router.plan(['blacklist.gsma', 'lock.activation'], '99999999');
+    expect(calls.map((c) => c.candidates[0]?.service.serviceId)).toEqual(['486']);
+    expect(uncovered).toEqual(['lock.activation']);
+  });
+
+  it('runCall executes once for a multi-capability service', async () => {
+    const provider = fakeProvider([wild, apple], { kind: 'answered', fields: [], misses: [] });
+    const router = new Router({ providers: [provider], breakers: new BreakerRegistry() });
+    const { calls } = router.plan(['blacklist.gsma', 'lock.activation'], '35310411');
+    const call = calls[0];
+    expect(call).toBeDefined();
+    if (call === undefined) throw new Error('unreachable');
+    await router.runCall({ call, imeiDigits: 'x', signal: AbortSignal.timeout(1000) });
+    expect(provider.executed).toHaveLength(1);
+  });
+});
+
 describe('circuit breaker', () => {
   it('opens after the threshold and reports open', () => {
     let now = 1000;

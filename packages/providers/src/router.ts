@@ -1,7 +1,37 @@
 import { randomUUID } from 'node:crypto';
 import type { Capability } from '@imei-check/contract';
 import type { BreakerRegistry } from './breaker.js';
+import { coversTac } from './catalogue.js';
 import type { CatalogueService, Provider, ProviderOutcome } from './types.js';
+
+/**
+ * One purchase to make: the capabilities it will answer, and the candidate services (this one plus
+ * its failover chain) ranked brand-specific-first-then-cheapest.
+ */
+export interface PlannedCall {
+  readonly capabilities: readonly Capability[];
+  readonly candidates: ReadonlyArray<{ provider: Provider; service: CatalogueService }>;
+}
+
+/** `['*']` is the least specific match; a listed TAC prefix beats it. */
+function specificity(service: CatalogueService): number {
+  return service.appliesToTacPrefixes.includes('*') ? 0 : 1;
+}
+
+/** Brand-specific first, then cheapest. Shared by `candidates` and `plan`'s failover ranking. */
+function ranked(a: { service: CatalogueService }, b: { service: CatalogueService }): number {
+  return specificity(b.service) - specificity(a.service) || a.service.costUsd - b.service.costUsd;
+}
+
+/**
+ * `PlannedCall.capabilities` is never empty in practice -- `plan()` never emits one, and `run()`
+ * always seeds one -- but the type is a `readonly Capability[]`. A guard, not a non-null assertion.
+ */
+function firstCapability(capabilities: readonly Capability[]): Capability {
+  const [capability] = capabilities;
+  if (capability === undefined) throw new Error('PlannedCall has no capabilities');
+  return capability;
+}
 
 /**
  * Picks a provider, runs it, and decides whether to try another.
@@ -44,6 +74,11 @@ export interface RouteResult {
   readonly service: CatalogueService | undefined;
 }
 
+export interface CallResult extends RouteResult {
+  /** All the capabilities this single call answered, e.g. all four for an all-in-one service. */
+  readonly capabilities: readonly Capability[];
+}
+
 export interface RouterHooks {
   /**
    * Called BEFORE the HTTP request, always.
@@ -73,28 +108,75 @@ export interface RouterOptions {
 export class Router {
   constructor(private readonly options: RouterOptions) {}
 
-  /** Ordered candidates: catalogue order is the preference order, cheapest-first by convention. */
-  candidates(capability: Capability, tac: string): Array<{ provider: Provider; service: CatalogueService }> {
-    const found: Array<{ provider: Provider; service: CatalogueService }> = [];
+  /** Every enabled service, from every provider, that covers this TAC -- unfiltered by capability. */
+  private servicesFor(tac: string): Array<{ provider: Provider; service: CatalogueService }> {
+    const out: Array<{ provider: Provider; service: CatalogueService }> = [];
     for (const provider of this.options.providers) {
-      const service = provider.supports(capability, tac);
-      if (service !== undefined) found.push({ provider, service });
+      for (const service of provider.catalogue()) {
+        if (service.enabled && coversTac(service, tac)) out.push({ provider, service });
+      }
     }
-    return found.sort((a, b) => a.service.costUsd - b.service.costUsd);
+    return out;
   }
 
+  /** Ordered candidates: brand-specific first, then cheapest. Used by `POST /v1/capabilities`. */
+  candidates(capability: Capability, tac: string): Array<{ provider: Provider; service: CatalogueService }> {
+    return this.servicesFor(tac)
+      .filter((c) => c.service.capabilities.includes(capability))
+      .sort(ranked);
+  }
+
+  /**
+   * Greedy set cover: repeatedly take the service that answers the most still-uncovered requested
+   * capabilities (ties: brand-specific, then cheaper). One Apple all-in-one then costs one order,
+   * not four -- imei24 charges again for every repeat.
+   */
+  plan(capabilities: readonly Capability[], tac: string): { calls: PlannedCall[]; uncovered: Capability[] } {
+    const pool = this.servicesFor(tac);
+    let remaining = [...new Set(capabilities)];
+    const calls: PlannedCall[] = [];
+
+    while (remaining.length > 0) {
+      const scored = pool
+        .map((c) => ({ ...c, covers: remaining.filter((cap) => c.service.capabilities.includes(cap)) }))
+        .filter((c) => c.covers.length > 0)
+        .sort((a, b) => b.covers.length - a.covers.length || ranked(a, b));
+      const best = scored[0];
+      if (best === undefined) break;
+
+      // Failover candidates: other services that cover the SAME set, ranked.
+      const callCandidates = pool
+        .filter((c) => best.covers.every((cap) => c.service.capabilities.includes(cap)))
+        .sort(ranked);
+      calls.push({ capabilities: best.covers, candidates: callCandidates });
+      remaining = remaining.filter((cap) => !best.covers.includes(cap));
+    }
+
+    return { calls, uncovered: remaining };
+  }
+
+  /** Thin wrapper: plan a single capability, then run it. */
   async run(args: {
     capability: Capability;
     tac: string;
     imeiDigits: string;
     signal: AbortSignal;
   }): Promise<RouteResult> {
+    const { calls } = this.plan([args.capability], args.tac);
+    const call = calls[0] ?? { capabilities: [args.capability], candidates: [] };
+    return this.runCall({ call, imeiDigits: args.imeiDigits, signal: args.signal });
+  }
+
+  async runCall(args: { call: PlannedCall; imeiDigits: string; signal: AbortSignal }): Promise<CallResult> {
     const now = this.options.now ?? (() => new Date());
-    const candidates = this.candidates(args.capability, args.tac);
+    const candidates = args.call.candidates;
+    // A `PlannedCall` always names at least one capability; this only guards the type.
+    const capability = firstCapability(args.call.capabilities);
 
     if (candidates.length === 0) {
       return {
-        capability: args.capability,
+        capability,
+        capabilities: args.call.capabilities,
         attempts: [],
         service: undefined,
         // Distinct from a transport failure: nothing was tried and nothing is wrong upstream. It
@@ -134,11 +216,11 @@ export class Router {
         attemptId,
         providerId: candidate.provider.id,
         serviceId: candidate.service.serviceId,
-        capability: args.capability,
+        capability,
         costUsd: candidate.service.costUsd,
       });
 
-      const outcome = await this.execute(candidate, args, attemptId);
+      const outcome = await this.execute(candidate, { capability, imeiDigits: args.imeiDigits, signal: args.signal }, attemptId);
       const finishedAt = now();
 
       if (outcome.kind === 'failed') breaker.recordFailure();
@@ -148,7 +230,7 @@ export class Router {
         attemptId,
         providerId: candidate.provider.id,
         serviceId: candidate.service.serviceId,
-        capability: args.capability,
+        capability,
         outcome,
         startedAt,
         finishedAt,
@@ -168,7 +250,7 @@ export class Router {
       void index;
     }
 
-    return { capability: args.capability, attempts, outcome: last, service: lastService };
+    return { capability, capabilities: args.call.capabilities, attempts, outcome: last, service: lastService };
   }
 
   private async execute(
