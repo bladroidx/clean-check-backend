@@ -446,3 +446,99 @@ describe('circuit breaker', () => {
     expect(breaker.isOpen()).toBe(false);
   });
 });
+
+/**
+ * Final review F3 / ruling R18: a failed attempt that may have reached the supplier is spend.
+ *
+ * imei24 debits on placement. A timeout (or a 5xx, or a reply we could not parse) arriving after
+ * the request left us is the COMMON case of a debit we got nothing for -- recording it at 0 makes
+ * the daily spend cap undercount exactly when the supplier is misbehaving. And because the order
+ * may exist, asking ANOTHER service of the same supplier for the same thing pays twice.
+ */
+describe('failed attempts: spend and same-provider failover (R18)', () => {
+  class Scripted implements Provider {
+    readonly executed: string[] = [];
+    constructor(
+      readonly id: string,
+      private readonly services: CatalogueService[],
+      private readonly outcomes: ProviderOutcome[],
+    ) {}
+    catalogue(): readonly CatalogueService[] {
+      return this.services;
+    }
+    supports(): CatalogueService | undefined {
+      return this.services[0];
+    }
+    async execute(request: ExecuteRequest): Promise<ProviderOutcome> {
+      this.executed.push(request.service.serviceId);
+      return this.outcomes.length > 1 ? this.outcomes.shift()! : this.outcomes[0]!;
+    }
+  }
+
+  const brand = service({ serviceId: '690', costUsd: 0.12, appliesToManufacturers: ['apple'] });
+  const wildcard = service({ serviceId: '486', costUsd: 0.1 });
+
+  async function runOne(providers: Provider[]) {
+    const finished: Array<{ serviceId: string; costUsd: number }> = [];
+    const router = new Router({
+      providers,
+      breakers: new BreakerRegistry(),
+      hooks: { onCallFinish: (a) => void finished.push({ serviceId: a.serviceId, costUsd: a.costUsd }) },
+    });
+    const { calls } = router.plan(['blacklist.gsma'], '35310411', 'apple');
+    const call = calls[0];
+    if (call === undefined) throw new Error('expected a planned call');
+    const result = await router.runCall({ call, imeiDigits: 'x', signal: AbortSignal.timeout(5_000) });
+    return { result, finished };
+  }
+
+  it('a failure after the request may have been sent keeps its catalogue cost', async () => {
+    for (const reason of ['timeout', 'http_error', 'malformed_response', 'transport_error'] as const) {
+      const p = new Scripted('p', [wildcard], [{ kind: 'failed', reason }]);
+      const { result, finished } = await runOne([p]);
+      expect(result.attempts[0]?.costUsd).toBe(0.1);
+      // The provider_calls row is finished with the same number the spend cap sums.
+      expect(finished).toEqual([{ serviceId: '486', costUsd: 0.1 }]);
+    }
+  });
+
+  it('a failure that provably never left us costs nothing', async () => {
+    const neverSent: ProviderOutcome[] = [
+      { kind: 'failed', reason: 'spend_cap_reached' },
+      { kind: 'failed', reason: 'rate_limited', notSent: true },
+      { kind: 'failed', reason: 'timeout', notSent: true },
+    ];
+    for (const outcome of neverSent) {
+      const p = new Scripted('p', [wildcard], [outcome]);
+      const { result } = await runOne([p]);
+      expect(result.attempts[0]?.costUsd).toBe(0);
+    }
+  });
+
+  it('never fails over to another service of the SAME provider after a possibly-sent failure', async () => {
+    const p = new Scripted('p', [brand, wildcard], [{ kind: 'failed', reason: 'timeout' }, CLEAN]);
+    const { result } = await runOne([p]);
+    expect(p.executed).toEqual(['690']);
+    expect(result.outcome.kind).toBe('failed');
+  });
+
+  it('still fails over to ANOTHER provider after a timeout', async () => {
+    const p = new Scripted('p', [brand], [{ kind: 'failed', reason: 'timeout' }]);
+    const q = new Scripted('q', [service({ providerId: 'q', serviceId: 'q1', costUsd: 0.2 })], [CLEAN]);
+    const { result } = await runOne([p, q]);
+    expect(q.executed).toEqual(['q1']);
+    expect(result.outcome).toEqual(CLEAN);
+  });
+
+  it('may retry the same provider after rate_limited or a never-sent failure', async () => {
+    for (const first of [
+      { kind: 'failed', reason: 'rate_limited' },
+      { kind: 'failed', reason: 'timeout', notSent: true },
+    ] as const) {
+      const p = new Scripted('p', [brand, wildcard], [first, CLEAN]);
+      const { result } = await runOne([p]);
+      expect(p.executed).toEqual(['690', '486']);
+      expect(result.outcome).toEqual(CLEAN);
+    }
+  });
+});

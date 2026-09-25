@@ -42,6 +42,14 @@ export type ProviderOutcome =
       readonly reason: FailureReason;
       readonly detail?: string;
       readonly httpStatus?: number;
+      /**
+       * True only when the request PROVABLY never left us -- our own lock, time budget or spend
+       * cap refused it first. Absent means "may have been sent", which is the default on purpose:
+       * a timeout after the supplier debited us is the common case, so a failure is priced as
+       * spend (and bars re-asking the same supplier) unless it can prove otherwise. See R18 in
+       * `router.ts`.
+       */
+      readonly notSent?: boolean;
     };
 
 /**

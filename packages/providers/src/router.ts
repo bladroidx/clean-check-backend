@@ -32,6 +32,34 @@ function ranked(a: { service: CatalogueService }, b: { service: CatalogueService
 /** Failure reasons that never count against a supplier's breaker. See the comment in `runCall`. */
 const OUR_OWN_REFUSALS: ReadonlySet<FailureReason> = new Set(['rate_limited', 'spend_cap_reached']);
 
+/** Reasons that by construction are decided before any request is sent. */
+const NEVER_SENT_REASONS: ReadonlySet<FailureReason> = new Set([
+  'spend_cap_reached',
+  'circuit_open',
+  'no_provider_configured',
+]);
+
+type Failed = Extract<ProviderOutcome, { kind: 'failed' }>;
+
+/**
+ * R18: a failure can only be priced at zero when the request provably never reached the supplier.
+ * Everything else -- a timeout, an abort after send, a 5xx, a reply we could not parse -- may have
+ * been debited, and the daily spend cap sums exactly this number.
+ */
+function neverSent(outcome: Failed): boolean {
+  return outcome.notSent === true || NEVER_SENT_REASONS.has(outcome.reason);
+}
+
+/**
+ * R18: may ANOTHER service of the same supplier be tried after this failure? Only when nothing can
+ * have been placed (never sent), or the supplier explicitly said "busy, one job at a time"
+ * (`rate_limited`). After a timeout the first order may well exist and be charged; placing a second
+ * one with a sibling service (#690 then #486) pays twice for one question.
+ */
+function allowsSameProviderFailover(outcome: Failed): boolean {
+  return neverSent(outcome) || outcome.reason === 'rate_limited';
+}
+
 /**
  * `PlannedCall.capabilities` is never empty in practice -- `plan()` never emits one, and `run()`
  * always seeds one -- but the type is a `readonly Capability[]`. A guard, not a non-null assertion.
@@ -55,6 +83,10 @@ function firstCapability(capabilities: readonly Capability[]): Capability {
  *
  * So exactly one outcome kind continues the loop — `failed` — and the test that proves it is
  * `router.test.ts:"does not fail over after a fail outcome"`.
+ *
+ * And even a `failed` only moves on to a DIFFERENT supplier unless it provably never left us or
+ * the supplier said it was busy (R18): after a timeout the order may exist and be paid for, and a
+ * sibling service of the same supplier would buy it a second time.
  */
 
 export interface Attempt {
@@ -221,6 +253,8 @@ export class Router {
       detail: 'no attempt was made',
     };
     let lastService: CatalogueService | undefined;
+    /** Suppliers a possibly-sent failure has barred from the rest of this call (R18). */
+    const barred = new Set<string>();
 
     for (const [index, candidate] of candidates.entries()) {
       // The caller's budget is spent (or it hung up): do not start another leg -- and above all
@@ -229,6 +263,9 @@ export class Router {
         last = { kind: 'failed', reason: 'timeout', detail: 'Not attempted: the time budget was spent.' };
         break;
       }
+      // The order from the failed leg may exist and be paid for: do not buy it again from a
+      // sibling service of the same supplier. Another supplier is still fair game.
+      if (barred.has(candidate.provider.id)) continue;
       const breaker = this.options.breakers.get(candidate.provider.id);
       lastService = candidate.service;
 
@@ -281,12 +318,18 @@ export class Router {
         latencyMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
         // Only the leg that produced the answer is billable, and only if it is not a failure.
         billable: outcome.kind !== 'failed',
-        costUsd: outcome.kind === 'failed' ? 0 : candidate.service.costUsd,
+        // What it cost US, which is not the same question: a failure keeps its price unless it
+        // provably never left (R18) -- otherwise the spend cap undercounts exactly when the
+        // supplier is timing out on orders it has already debited.
+        costUsd: outcome.kind === 'failed' && neverSent(outcome) ? 0 : candidate.service.costUsd,
       };
       attempts.push(attempt);
       await this.options.hooks?.onCallFinish?.(attempt);
 
       last = outcome;
+      if (outcome.kind === 'failed' && !allowsSameProviderFailover(outcome)) {
+        barred.add(candidate.provider.id);
+      }
 
       // THE RULE. Anything that is not a transport failure ends the loop, whatever it says.
       if (outcome.kind !== 'failed') break;

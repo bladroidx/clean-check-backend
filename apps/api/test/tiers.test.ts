@@ -309,3 +309,19 @@ describe('IMEI encryption at rest (ADR-0007)', () => {
     }
   });
 });
+
+describe('the daily spend cap counts what may have been spent (R18)', () => {
+  it('a timed-out order is spend: the next order past the cap is refused, not placed', async () => {
+    // 6 USD a call against the default 10 USD cap. At 0 per timeout (the old behaviour) every
+    // retry would sail under the cap while the supplier kept debiting us for orders it had placed.
+    const provider = new FakeProvider('fake', { kind: 'failed', reason: 'timeout' }, [service({ providerId: 'fake', costUsd: 6 })]);
+    const h = await makePaidApp({ providers: [provider] });
+
+    const first = (await post(h, '/v1/deep_checks', { imei: SENTINEL })).json<CheckReport>();
+    expect(first.sections['blacklist.gsma']).toMatchObject({ outcome: 'unavailable', reason: 'provider_timeout' });
+
+    const second = (await post(h, '/v1/deep_checks', { imei: SENTINEL })).json<CheckReport>();
+    expect(second.sections['blacklist.gsma']).toMatchObject({ outcome: 'unavailable', reason: 'spend_cap_reached' });
+    expect(provider.executed).toHaveLength(1);
+  });
+});

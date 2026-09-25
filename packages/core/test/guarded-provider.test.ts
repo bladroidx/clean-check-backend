@@ -36,7 +36,7 @@ describe('GuardedProvider', () => {
     const p = new GuardedProvider(inner, { lock: repos.locks, lockWaitMs: 20, dailySpendUsd: 10, costSince: async () => 0 });
     const [a, b] = await Promise.all([p.execute(req()), p.execute(req())]);
     expect([a.kind, b.kind].sort()).toEqual(['answered', 'failed']);
-    expect([a, b].find((o) => o.kind === 'failed')).toMatchObject({ reason: 'rate_limited' });
+    expect([a, b].find((o) => o.kind === 'failed')).toMatchObject({ reason: 'rate_limited', notSent: true });
   });
 
   it('the caller signal bounds the lock WAIT, and an order is never placed after it aborted', async () => {
@@ -51,7 +51,8 @@ describe('GuardedProvider', () => {
     const started = Date.now();
     const outcome = await p.execute(req(AbortSignal.timeout(50)));
     expect(Date.now() - started).toBeLessThan(1_000);
-    expect(outcome).toMatchObject({ kind: 'failed', reason: 'timeout' });
+    // Refused while still waiting: provably never sent, so the router prices it at 0 (R18).
+    expect(outcome).toMatchObject({ kind: 'failed', reason: 'timeout', notSent: true });
 
     // The lock frees up later: the abandoned waiter must not run the call.
     release();
@@ -64,7 +65,7 @@ describe('GuardedProvider', () => {
     const repos = new MemoryRepositories();
     const inner = new Slow(1);
     const p = new GuardedProvider(inner, { lock: repos.locks, lockWaitMs: 100, dailySpendUsd: 10, costSince: async () => 10.05 });
-    expect(await p.execute(req())).toMatchObject({ kind: 'failed', reason: 'spend_cap_reached' });
+    expect(await p.execute(req())).toMatchObject({ kind: 'failed', reason: 'spend_cap_reached', notSent: true });
     expect(inner.calls).toBe(0);
   });
 

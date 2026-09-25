@@ -86,7 +86,12 @@ export class GuardedProvider implements Provider {
     // includes it: exceeding means this call is the one that would cross the line.
     const spent = await this.options.costSince(this.id, dayStart);
     if (spent > this.options.dailySpendUsd) {
-      return { kind: 'failed', reason: 'spend_cap_reached', detail: 'daily supplier spend cap reached' };
+      return {
+        kind: 'failed',
+        reason: 'spend_cap_reached',
+        detail: 'daily supplier spend cap reached',
+        notSent: true,
+      };
     }
     return this.locked(() => this.inner.execute(request), request.signal);
   }
@@ -108,14 +113,17 @@ export class GuardedProvider implements Provider {
     const result = signal === undefined ? await attempt : await raceAbort(attempt, signal, state);
     return result.acquired
       ? result.value
-      : { kind: 'failed', reason: 'rate_limited', detail: 'supplier is busy with another job' };
+      : // Our own lock was busy: the request never left, so it is priced at zero (R18).
+        { kind: 'failed', reason: 'rate_limited', detail: 'supplier is busy with another job', notSent: true };
   }
 }
 
+/** Refused while still waiting for the lock -- never sent, so never spend (R18). */
 const BUDGET_SPENT: ProviderOutcome = {
   kind: 'failed',
   reason: 'timeout',
   detail: 'The time budget was spent before the supplier was free.',
+  notSent: true,
 };
 
 type LockResult = { readonly acquired: true; readonly value: ProviderOutcome } | { readonly acquired: false };
