@@ -1,4 +1,5 @@
 import type { Lexicon } from './lexicon.js';
+import { IMEI24_LEXICONS } from './imei24-lexicons.js';
 
 /**
  * The shipped lexicons.
@@ -110,7 +111,7 @@ export const DHRU_APPLE: Lexicon = {
   ],
 };
 
-export const BUILTIN_LEXICONS: readonly Lexicon[] = [DHRU_BLACKLIST, DHRU_APPLE];
+export const BUILTIN_LEXICONS: readonly Lexicon[] = [DHRU_BLACKLIST, DHRU_APPLE, ...IMEI24_LEXICONS];
 
 export function lexiconFor(providerId: string, lexiconId: string): Lexicon | undefined {
   return BUILTIN_LEXICONS.find((l) => l.providerId === providerId && l.lexiconId === lexiconId);

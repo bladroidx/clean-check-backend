@@ -6,5 +6,6 @@ export * from './router.js';
 export * from './normalise/extract.js';
 export * from './normalise/lexicon.js';
 export * from './normalise/lexicons.js';
+export * from './normalise/imei24-lexicons.js';
 export * from './dhru/transport.js';
 export * from './dhru/legacy.js';

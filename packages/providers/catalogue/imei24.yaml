@@ -1,0 +1,182 @@
+# imei24 (pro.imei24.com) — legacy DHRU Fusion protocol, served by DhruLegacyProvider.
+#
+# Service IDs are the supplier's, and they are the ONLY routing key. The display names below are
+# seller-authored marketing copy, recorded so an operator can find the service in imei24's panel
+# and for no other purpose. Never route on them (ADR-0002).
+#
+# cost_usd is what imei24 charges us, from the 2026-09-25 price list, and is checked in so a margin
+# change is a reviewable diff rather than a surprise in next month's invoice. credits is always 0:
+# billing was removed (CLAUDE.md "Money") — this service runs single-consumer for one seeded tenant
+# and nothing is ever charged on the wire.
+#
+# TAC prefixes below are placeholders, not the real brand ranges. Task 6 generates the full list
+# from the TAC directory; until then Apple/Samsung use the two TACs already used in this repo's own
+# tests (35310411, 35847191) and every other brand uses a dummy prefix that parses but matches
+# nothing in practice.
+provider_id: imei24
+services:
+  - service_id: "486"
+    display_name: "Global Blacklist checker"
+    capabilities: [blacklist.gsma]
+    fields: [blacklist.status, identity.manufacturer, identity.model]
+    lexicon: imei24-blacklist
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["*"]
+    enabled: true
+
+  - service_id: "690"
+    display_name: "Apple check warranty|FMI status| Blacklist status | Carrier and Simlock"
+    capabilities: [blacklist.gsma, lock.activation, lock.carrier, warranty.purchase_date]
+    fields:
+      - blacklist.status
+      - lock.activation.status
+      - lock.carrier.status
+      - lock.carrier.network
+      - warranty.purchase_date
+      - identity.manufacturer
+      - identity.model
+    lexicon: imei24-apple
+    cost_usd: 0.12
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["35310411"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "678"
+    display_name: "Apple check MDM status ON/OFF (Instant)"
+    capabilities: [lock.mdm]
+    fields: [lock.mdm.status, identity.model]
+    lexicon: imei24-mdm
+    cost_usd: 1.50
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["35310411"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "783"
+    display_name: "Samsung Worldwide warranty and blacklist check"
+    capabilities: [blacklist.gsma, warranty.purchase_date]
+    fields: [blacklist.status, warranty.purchase_date, identity.manufacturer, identity.model]
+    lexicon: imei24-samsung
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["35847191"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "487"
+    display_name: "Samsung Worldwide warranty and carrier check - v1"
+    capabilities: [lock.carrier, warranty.purchase_date]
+    fields: [lock.carrier.status, lock.carrier.network, warranty.purchase_date, identity.model]
+    lexicon: imei24-samsung
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["35847191"] # prefixes generated in Task 6
+    enabled: true
+
+  # Per-brand warranty checks. All 0.10 USD, lexicon imei24-warranty, capabilities
+  # [warranty.purchase_date], fields [warranty.purchase_date, identity.model]. TAC prefixes are
+  # dummy placeholders that parse but match nothing real yet — Task 6 replaces them.
+  - service_id: "428"
+    display_name: "Motorola Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "437"
+    display_name: "Huawei Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "429"
+    display_name: "LG Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "467"
+    display_name: "Sony Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "485"
+    display_name: "Lenovo Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "707"
+    display_name: "Oppo Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "709"
+    display_name: "Vivo Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
+
+  - service_id: "488"
+    display_name: "HTC Warranty Status"
+    capabilities: [warranty.purchase_date]
+    fields: [warranty.purchase_date, identity.model]
+    lexicon: imei24-warranty
+    cost_usd: 0.10
+    credits: 0
+    async: true
+    timeout_ms: 8000
+    applies_to_tac_prefixes: ["00000000"] # prefixes generated in Task 6
+    enabled: true
