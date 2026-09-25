@@ -12,6 +12,7 @@ import type {
   OrderRow,
   ProviderCallRepo,
   ProviderCallRow,
+  ProviderLock,
   Repositories,
   StoredSection,
   Tenant,
@@ -147,6 +148,7 @@ export class PgRepositories implements Repositories {
   readonly cache: CacheRepo;
   readonly orders: OrderRepo;
   readonly idempotency: IdempotencyRepo;
+  readonly locks: ProviderLock;
 
   constructor(private readonly pool: pg.Pool) {
     this.tenants = new PgTenantRepo(pool);
@@ -156,6 +158,7 @@ export class PgRepositories implements Repositories {
     this.cache = new PgCacheRepo(pool);
     this.orders = new PgOrderRepo(pool);
     this.idempotency = new PgIdempotencyRepo(pool);
+    this.locks = new PgProviderLock(pool);
   }
 
   async close(): Promise<void> {
@@ -413,6 +416,55 @@ class PgProviderCallRepo implements ProviderCallRepo {
       [tenantId, since],
     );
     return Number(rows[0]?.total ?? 0);
+  }
+  async costSinceForProvider(providerId: string, since: Date): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT COALESCE(SUM(provider_cost_usd),0) AS total FROM provider_calls
+       WHERE provider_id = $1 AND started_at >= $2`,
+      [providerId, since],
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+}
+
+/**
+ * Session-level `pg_try_advisory_lock`, taken and released on the SAME pooled client.
+ *
+ * A dedicated `pool.connect()` rather than `pool.query()` is the whole point: the advisory lock is
+ * tied to the Postgres session (backend connection) that took it, not to the logical "transaction"
+ * -- `pool.query()` may hand consecutive statements to different pooled connections, which would
+ * silently release-on-acquire or unlock-the-wrong-session. Polling at 100ms rather than tighter
+ * keeps this cheap enough to run from both the API and the worker without becoming its own load.
+ */
+class PgProviderLock implements ProviderLock {
+  constructor(private readonly pool: pg.Pool) {}
+
+  async withLock<T>(
+    name: string,
+    waitMs: number,
+    fn: () => Promise<T>,
+  ): Promise<{ acquired: true; value: T } | { acquired: false }> {
+    const client = await this.pool.connect();
+    const deadline = Date.now() + waitMs;
+    try {
+      for (;;) {
+        const { rows } = await client.query<{ ok: boolean }>(
+          'SELECT pg_try_advisory_lock(hashtext($1)) AS ok',
+          [name],
+        );
+        const gotLock = rows[0]?.ok === true;
+        if (gotLock) break;
+        if (Date.now() >= deadline) return { acquired: false };
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      try {
+        return { acquired: true, value: await fn() };
+      } finally {
+        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [name]);
+      }
+    } finally {
+      client.release();
+    }
   }
 }
 

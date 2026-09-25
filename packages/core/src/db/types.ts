@@ -101,6 +101,25 @@ export interface ProviderCallRepo {
   start(row: ProviderCallRow): Promise<void>;
   finish(id: string, patch: Partial<ProviderCallRow>): Promise<void>;
   costSince(tenantId: string, since: Date): Promise<number>;
+  /** Same shape as `costSince`, keyed by provider rather than tenant -- the daily spend cap. */
+  costSinceForProvider(providerId: string, since: Date): Promise<number>;
+}
+
+/**
+ * A cross-process advisory lock, named rather than typed to the resource it protects.
+ *
+ * imei24 allows exactly one job in flight at a time, per API key, across every process that might
+ * call it -- the API and the worker both poll. This is the only guard in the service that must be
+ * true across processes rather than just within one, which is why it needs its own repository
+ * rather than an in-process mutex.
+ */
+export interface ProviderLock {
+  /** Runs fn holding the named cross-process lock, or returns undefined if it could not be taken within waitMs. */
+  withLock<T>(
+    name: string,
+    waitMs: number,
+    fn: () => Promise<T>,
+  ): Promise<{ readonly acquired: true; readonly value: T } | { readonly acquired: false }>;
 }
 
 export interface CacheRow {
@@ -177,5 +196,6 @@ export interface Repositories {
   readonly cache: CacheRepo;
   readonly orders: OrderRepo;
   readonly idempotency: IdempotencyRepo;
+  readonly locks: ProviderLock;
   close(): Promise<void>;
 }
