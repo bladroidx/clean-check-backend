@@ -421,13 +421,28 @@ class PgProviderCallRepo implements ProviderCallRepo {
     );
   }
   async finish(id: string, patch: Partial<ProviderCallRow>): Promise<void> {
+    // provider_cost_usd must be updated here too: the router now decides the FINAL cost of an
+    // attempt (0 for anything never sent -- dedupe hits, spend-cap refusals, lock-busy
+    // rate_limited, a failing beforeSend), and onCallFinish forwards that as `patch.providerCostUsd`.
+    // Without this the column keeps the catalogue price onCallStart wrote, and the daily spend cap
+    // (costSinceForProvider, below) overcounts every one of those cases. COALESCE, not a bare
+    // assignment, so a `finish` call that omits the field (there is none today, but the interface
+    // allows it) still leaves the started cost alone rather than nulling it out.
     await this.pool.query(
       `UPDATE provider_calls SET
          status = COALESCE($2, status), latency_ms = COALESCE($3, latency_ms),
          billable = COALESCE($4, billable), error_code = COALESCE($5, error_code),
-         finished_at = COALESCE($6, finished_at)
+         finished_at = COALESCE($6, finished_at), provider_cost_usd = COALESCE($7, provider_cost_usd)
        WHERE id = $1`,
-      [id, patch.status ?? null, patch.latencyMs ?? null, patch.billable ?? null, patch.errorCode ?? null, patch.finishedAt ?? null],
+      [
+        id,
+        patch.status ?? null,
+        patch.latencyMs ?? null,
+        patch.billable ?? null,
+        patch.errorCode ?? null,
+        patch.finishedAt ?? null,
+        patch.providerCostUsd ?? null,
+      ],
     );
   }
   async costSince(tenantId: string, since: Date): Promise<number> {
