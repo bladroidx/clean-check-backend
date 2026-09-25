@@ -1,4 +1,4 @@
-import { loadConfig, imei24CredentialsFrom } from './config.js';
+import { loadConfig, imei24CredentialsFrom, imeiCipherFrom } from './config.js';
 import { buildApp } from './app.js';
 import { createLogger } from './lib/log.js';
 import { loadTacDirectory } from './lib/tac.js';
@@ -47,13 +47,18 @@ for (const skipped of built.skipped) {
   logger.warn({ provider: skipped.providerId, reason: skipped.reason }, 'provider not configured');
 }
 
+// `loadConfig`'s `superRefine` already refused to boot with a database and no valid keyring, so
+// this is only ever undefined in the free-tier-only branch below, which never builds a cipher.
+const cipher = imeiCipherFrom(config);
+
 const services =
-  repos !== undefined
+  repos !== undefined && cipher !== undefined
     ? buildServices({
         repos,
         providers: built.providers,
         metrics,
         pepper: Buffer.from(config.SERVER_PEPPER, 'utf8'),
+        cipher,
         feedbackUrlFor: (providerId) => feedbackUrlFor(config, providerId),
         deepWaitMs: config.DEEP_CHECK_WAIT_MS,
         dailySpendUsd: config.IMEI24_DAILY_SPEND_USD,

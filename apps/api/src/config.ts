@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import type { Imei24Credentials } from '@imei-check/core';
+import { ImeiCipher, type Imei24Credentials } from '@imei-check/core';
 
 /**
  * Configuration, validated once at boot.
@@ -89,10 +89,38 @@ export const ConfigSchema = z.object({
   RATE_LIMIT_ENABLED: z.coerce.boolean().default(true),
 });
 
+/**
+ * `IMEI_ENCRYPTION_KEYS` is only meaningful once there is a database to write ciphertext into,
+ * but once `DATABASE_URL` is set every check -- free and deep alike -- encrypts the IMEI (ADR-0007),
+ * so a paid deployment without a valid keyring must refuse to boot rather than boot and fail on
+ * the first check. `ImeiCipher.fromKeyring`'s own message (never key material, never digits) is
+ * reused verbatim so there is exactly one place that explains what a valid keyring looks like.
+ */
+const FullConfigSchema = ConfigSchema.superRefine((config, ctx) => {
+  if (config.DATABASE_URL === undefined) return;
+  if (config.IMEI_ENCRYPTION_KEYS === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['IMEI_ENCRYPTION_KEYS'],
+      message: 'IMEI_ENCRYPTION_KEYS is required once DATABASE_URL is set (ADR-0007).',
+    });
+    return;
+  }
+  try {
+    ImeiCipher.fromKeyring(config.IMEI_ENCRYPTION_KEYS);
+  } catch (error) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['IMEI_ENCRYPTION_KEYS'],
+      message: error instanceof Error ? error.message : 'invalid IMEI_ENCRYPTION_KEYS',
+    });
+  }
+});
+
 export type Config = z.infer<typeof ConfigSchema>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const parsed = ConfigSchema.safeParse(env);
+  const parsed = FullConfigSchema.safeParse(env);
   if (!parsed.success) {
     // Report every missing variable at once. A boot failure that reveals one problem per restart
     // wastes the operator's afternoon.
@@ -108,4 +136,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 export function imei24CredentialsFrom(config: Config): Imei24Credentials | undefined {
   if (!config.IMEI24_USERNAME || !config.IMEI24_API_KEY) return undefined;
   return { baseUrl: config.IMEI24_BASE_URL, username: config.IMEI24_USERNAME, apiKey: config.IMEI24_API_KEY };
+}
+
+/**
+ * `undefined` only when there is no database (the free offline tier, which never encrypts
+ * anything). Once `DATABASE_URL` is set, `loadConfig`'s `superRefine` has already guaranteed
+ * `IMEI_ENCRYPTION_KEYS` parses, so this cannot throw in practice.
+ */
+export function imeiCipherFrom(config: Config): ImeiCipher | undefined {
+  if (config.DATABASE_URL === undefined || config.IMEI_ENCRYPTION_KEYS === undefined) return undefined;
+  return ImeiCipher.fromKeyring(config.IMEI_ENCRYPTION_KEYS);
 }

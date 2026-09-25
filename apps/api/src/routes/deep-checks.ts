@@ -97,6 +97,7 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
                   cache: services.cache,
                   tacDirectory: app.tacDirectory,
                   metrics: services.metrics,
+                  cipher: services.cipher,
                 },
                 {
                   tier: 'deep',

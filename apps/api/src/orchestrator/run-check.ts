@@ -24,6 +24,7 @@ import type { Repositories } from '@imei-check/core';
 import { assembleSection, deriveWarrantyStatus } from '@imei-check/core';
 import { coverageFor } from '@imei-check/core';
 import { identityCoverage } from '@imei-check/core';
+import type { ImeiCipher } from '@imei-check/core';
 
 /**
  * One check, end to end, in one of two tiers.
@@ -54,6 +55,8 @@ export interface RunCheckDeps {
   readonly cache: FieldCache;
   readonly tacDirectory: TacDirectory;
   readonly metrics: Metrics;
+  /** ADR-0007: encrypts the IMEI before it is ever persisted -- required for both tiers. */
+  readonly cipher: ImeiCipher;
   readonly now?: () => Date;
 }
 
@@ -103,6 +106,11 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
       ? [...request.capabilities, 'warranty.purchase_date']
       : request.capabilities;
 
+  // AAD is the check id exactly as stored (with hyphens), so a ciphertext copied onto another
+  // row's id fails to decrypt (ADR-0007). Both tiers encrypt: the free tier stores an IMEI just as
+  // much as the deep one does.
+  const { ciphertext, keyVersion } = deps.cipher.encrypt(request.imei.digits, checkId);
+
   await deps.repos.checks.insert({
     id: checkId,
     tenantId: request.tenantId,
@@ -118,9 +126,8 @@ export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Pr
     createdAt: startedAt,
     completedAt: undefined,
     tier: request.tier,
-    // Task 11 encrypts the IMEI for both tiers (ADR-0007).
-    imeiEncrypted: undefined,
-    imeiKeyVersion: undefined,
+    imeiEncrypted: ciphertext,
+    imeiKeyVersion: keyVersion,
   });
 
   const sections = new Map<Capability, SectionResult>();

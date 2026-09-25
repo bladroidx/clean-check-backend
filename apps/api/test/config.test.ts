@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 
@@ -11,6 +12,8 @@ import { loadConfig } from '../src/config.js';
 
 const GOOD_PEPPER = 'x'.repeat(32);
 const base = { SERVER_PEPPER: GOOD_PEPPER } as NodeJS.ProcessEnv;
+const GOOD_KEYRING = `1:${randomBytes(32).toString('base64')}`;
+const DB_URL = 'postgres://user:pass@localhost:5432/imei_check';
 
 describe('loadConfig', () => {
   it('accepts a 32-byte pepper and applies the defaults', () => {
@@ -92,5 +95,43 @@ describe('loadConfig', () => {
     expect(c.IMEI24_BASE_URL).toBe('https://pro.imei24.com');
     expect(c.DEEP_CHECK_WAIT_MS).toBe(10_000);
     expect(c.IMEI24_DAILY_SPEND_USD).toBe(10);
+  });
+
+  describe('IMEI_ENCRYPTION_KEYS (ADR-0007)', () => {
+    it('is not required without a database', () => {
+      expect(() => loadConfig(base)).not.toThrow();
+    });
+
+    it('is required once DATABASE_URL is set', () => {
+      expect(() =>
+        loadConfig({ ...base, DATABASE_URL: DB_URL } as NodeJS.ProcessEnv),
+      ).toThrow(/IMEI_ENCRYPTION_KEYS/);
+    });
+
+    it('boots with DATABASE_URL and a valid keyring', () => {
+      const c = loadConfig({
+        ...base,
+        DATABASE_URL: DB_URL,
+        IMEI_ENCRYPTION_KEYS: GOOD_KEYRING,
+      } as NodeJS.ProcessEnv);
+      expect(c.IMEI_ENCRYPTION_KEYS).toBe(GOOD_KEYRING);
+    });
+
+    it('rejects a malformed keyring and never echoes the key', () => {
+      const badKey = Buffer.alloc(16).toString('base64');
+      try {
+        loadConfig({
+          ...base,
+          DATABASE_URL: DB_URL,
+          IMEI_ENCRYPTION_KEYS: `1:${badKey}`,
+        } as NodeJS.ProcessEnv);
+        expect.unreachable('should have thrown');
+      } catch (e) {
+        const message = (e as Error).message;
+        expect(message).toMatch(/IMEI_ENCRYPTION_KEYS/);
+        expect(message).toMatch(/32 bytes/);
+        expect(message).not.toContain(badKey);
+      }
+    });
   });
 });

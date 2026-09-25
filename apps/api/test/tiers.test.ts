@@ -294,3 +294,18 @@ describe('the deep-check time budget (R10/R11)', () => {
     expect(value.json<CheckReport>().status).toBe('partial');
   });
 });
+
+describe('IMEI encryption at rest (ADR-0007)', () => {
+  it('a free and a deep check both store an IMEI that decrypts to the sentinel', async () => {
+    const h = await makePaidApp();
+
+    const free = (await post(h, '/v1/checks', { imei: SENTINEL })).json<CheckReport>();
+    const deep = (await post(h, '/v1/deep_checks', { imei: SENTINEL })).json<CheckReport>();
+
+    for (const checkId of [free.check_id, deep.check_id]) {
+      const stored = await h.repos.checks.encryptedImei(checkId);
+      expect(stored).toBeDefined();
+      expect(h.services.cipher.decrypt(stored!.imeiEncrypted, stored!.imeiKeyVersion, checkId)).toBe(SENTINEL);
+    }
+  });
+});

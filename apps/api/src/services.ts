@@ -1,6 +1,6 @@
 import type { Capability } from '@imei-check/contract';
 import { BreakerRegistry, Router, type Provider } from '@imei-check/providers';
-import { FieldCache, GuardedProvider } from '@imei-check/core';
+import { FieldCache, GuardedProvider, type ImeiCipher } from '@imei-check/core';
 import {
   ConcurrencyGate,
   LIMITS,
@@ -31,6 +31,8 @@ export interface AppServices {
   readonly breakers: BreakerRegistry;
   /** `SERVER_PEPPER`. The internal hash key, never returned and never per-tenant. */
   readonly pepper: Buffer;
+  /** ADR-0007: the keyring every check's IMEI is encrypted under before it is ever persisted. */
+  readonly cipher: ImeiCipher;
   /** What `POST /v1/checks` answers when the caller names nothing. Offline only. */
   readonly defaultCapabilities: readonly Capability[];
   /** What `POST /v1/deep_checks` buys when the caller names nothing. */
@@ -69,6 +71,7 @@ export interface BuildServicesOptions {
   readonly providers: readonly Provider[];
   readonly metrics: Metrics;
   readonly pepper: Buffer;
+  readonly cipher: ImeiCipher;
   readonly feedbackUrlFor?: (providerId: string) => string | undefined;
   readonly defaultCapabilities?: readonly Capability[];
   readonly now?: () => Date;
@@ -157,6 +160,7 @@ export function buildServices(options: BuildServicesOptions): AppServices {
     maxConcurrentChecks: MAX_CONCURRENT_PAID_CHECKS,
     breakers,
     pepper: options.pepper,
+    cipher: options.cipher,
     defaultCapabilities: options.defaultCapabilities ?? FREE_DEFAULT_CAPABILITIES,
     deepDefaultCapabilities: DEEP_DEFAULT_CAPABILITIES,
     deepWaitMs,

@@ -1,5 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { InMemoryTacDirectory } from '@imei-check/identity';
-import { MemoryRepositories, Metrics, type Repositories } from '@imei-check/core';
+import { ImeiCipher, MemoryRepositories, Metrics, type Repositories } from '@imei-check/core';
 import {
   coversTac,
   type CatalogueService,
@@ -25,6 +26,8 @@ import { generateApiKey } from '../src/auth/keys.js';
 /** 48 bytes, as `generateTenantSalt` produces. A short one is now refused at creation. */
 export const TENANT_SALT = 'dGVzdC10ZW5hbnQtc2FsdC00OC1ieXRlcy1sb25nLWZvci10ZXN0cw==';
 export const PEPPER = Buffer.from('a'.repeat(48), 'utf8');
+/** Fixed keyring built once so every test that decrypts a stored IMEI can share it (ADR-0007). */
+export const TEST_CIPHER = ImeiCipher.fromKeyring(`1:${randomBytes(32).toString('base64')}`);
 
 export function service(overrides: Partial<CatalogueService> = {}): CatalogueService {
   return {
@@ -171,6 +174,7 @@ export async function makePaidApp(options: {
     providers: options.providers ?? [new FakeProvider('fake', CLEAN)],
     metrics: new Metrics(false),
     pepper: PEPPER,
+    cipher: TEST_CIPHER,
     deepWaitMs: options.deepWaitMs ?? 1_000,
     pollIntervalMs: options.pollIntervalMs ?? 250,
   });
