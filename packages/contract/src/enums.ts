@@ -44,6 +44,8 @@ export const Reason = z.enum([
   'insufficient_credits',
   'rate_limited_upstream',
   'not_implemented',
+  'requires_deep_check',
+  'spend_cap_reached',
   'cancelled',
 ]);
 export type Reason = z.infer<typeof Reason>;

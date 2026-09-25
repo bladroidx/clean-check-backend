@@ -19,7 +19,7 @@ import { BLOCKED, CLEAN, FakeProvider, REWORDED, TIMEOUT, idempotencyKey, makePa
 
 const REPO = resolve(import.meta.dirname, '..', '..', '..');
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.claude']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.claude', '.superpowers']); // .superpowers is git-ignored local tooling scratch
 // The vectors and the tests are *supposed* to contain the sentinel: they are how it is asserted.
 // README.md is allowed ONLY the documented synthetic example, which the next test pins exactly --
 // broadening this list without pinning the content would quietly disable the guard for docs.

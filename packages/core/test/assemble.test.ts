@@ -321,3 +321,16 @@ describe('an unsupplied capability', () => {
     expect(section.reason).toBe('provider_not_configured');
   });
 });
+
+describe('spend cap', () => {
+  it('maps a spend-cap failure to unavailable(spend_cap_reached)', () => {
+    const section = assembleSection({
+      capability: 'blacklist.gsma',
+      outcome: { kind: 'failed', reason: 'spend_cap_reached', detail: 'daily supplier spend cap reached' },
+      coverage: blacklistCoverage,
+      checkedAt: CHECKED_AT,
+    });
+    expect(section.outcome).toBe('unavailable');
+    expect(section.reason).toBe('spend_cap_reached');
+  });
+});

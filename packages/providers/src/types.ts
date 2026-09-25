@@ -68,7 +68,8 @@ export type FailureReason =
   | 'insufficient_provider_balance'
   | 'rate_limited'
   | 'circuit_open'
-  | 'malformed_response';
+  | 'malformed_response'
+  | 'spend_cap_reached';
 
 export interface LexiconMiss {
   readonly field: CanonicalField;

@@ -370,7 +370,8 @@ function failureReason(
   | 'provider_error'
   | 'circuit_open'
   | 'rate_limited_upstream'
-  | 'provider_not_configured' {
+  | 'provider_not_configured'
+  | 'spend_cap_reached' {
   switch (reason) {
     case 'timeout':
       return 'provider_timeout';
@@ -391,6 +392,9 @@ function failureReason(
     case 'http_error':
     case 'malformed_response':
       return 'provider_error';
+    case 'spend_cap_reached':
+      // Our own budget guard, not the supplier and not the caller. Distinct so it pages us.
+      return 'spend_cap_reached';
   }
 }
 
