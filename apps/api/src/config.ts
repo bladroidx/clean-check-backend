@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { ImeiCipher, type Imei24Credentials } from '@imei-check/core';
+import { ImeiCipher, imei24CredentialsFromEnv, type Imei24Credentials } from '@imei-check/core';
 
 /**
  * Configuration, validated once at boot.
@@ -97,6 +97,17 @@ export const ConfigSchema = z.object({
  * reused verbatim so there is exactly one place that explains what a valid keyring looks like.
  */
 const FullConfigSchema = ConfigSchema.superRefine((config, ctx) => {
+  // Half-set imei24 credentials are a typo, not the free-only mode (R19): refuse to boot.
+  try {
+    imei24CredentialsFromEnv(config);
+  } catch (error) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['IMEI24_API_KEY'],
+      message: error instanceof Error ? error.message : 'IMEI24_USERNAME and IMEI24_API_KEY must be set together',
+    });
+  }
+
   if (config.DATABASE_URL === undefined) return;
   if (config.IMEI_ENCRYPTION_KEYS === undefined) {
     ctx.addIssue({
@@ -132,10 +143,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return parsed.data;
 }
 
-/** `undefined` when the account isn't configured -- imei24 is then simply not built (a supported mode). */
+/**
+ * `undefined` when the account isn't configured -- imei24 is then simply not built (a supported
+ * mode). A half-configured account never reaches here: `loadConfig` has already refused it.
+ */
 export function imei24CredentialsFrom(config: Config): Imei24Credentials | undefined {
-  if (!config.IMEI24_USERNAME || !config.IMEI24_API_KEY) return undefined;
-  return { baseUrl: config.IMEI24_BASE_URL, username: config.IMEI24_USERNAME, apiKey: config.IMEI24_API_KEY };
+  return imei24CredentialsFromEnv(config);
 }
 
 /**

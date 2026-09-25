@@ -78,6 +78,26 @@ describe('loadConfig', () => {
     );
   });
 
+  /**
+   * R19: half-configured credentials used to be silently skipped -- imei24 simply not built, every
+   * deep section `provider_not_configured` -- which looks like a supplier outage rather than the
+   * typo it is. Refuse to boot instead, naming the variables and never echoing a value.
+   */
+  it('refuses to boot with only one of IMEI24_USERNAME / IMEI24_API_KEY', () => {
+    const secret = 'sk-live-do-not-echo';
+    for (const partial of [{ IMEI24_USERNAME: 'ops@example.com' }, { IMEI24_API_KEY: secret }]) {
+      expect(() => loadConfig({ ...base, ...partial } as NodeJS.ProcessEnv)).toThrow(/IMEI24_USERNAME.*IMEI24_API_KEY|IMEI24_API_KEY.*IMEI24_USERNAME/);
+      try {
+        loadConfig({ ...base, ...partial } as NodeJS.ProcessEnv);
+      } catch (e) {
+        expect((e as Error).message).not.toContain(secret);
+      }
+    }
+    // Both, or neither, is fine.
+    expect(() => loadConfig(base)).not.toThrow();
+    expect(() => loadConfig({ ...base, IMEI24_USERNAME: 'ops@example.com', IMEI24_API_KEY: secret } as NodeJS.ProcessEnv)).not.toThrow();
+  });
+
   it('rejects a wait window above 12 s', () => {
     expect(() => loadConfig({ ...base, DEEP_CHECK_WAIT_MS: '15000' } as NodeJS.ProcessEnv)).toThrow(
       /DEEP_CHECK_WAIT_MS/,

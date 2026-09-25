@@ -19,6 +19,36 @@ export interface Imei24Credentials {
   readonly apiKey: string;
 }
 
+const IMEI24_DEFAULT_BASE_URL = 'https://pro.imei24.com';
+
+/**
+ * imei24 credentials from the environment: both set, or neither (the supported free-only mode).
+ *
+ * Exactly one set is a typo, not a mode. Skipping it silently would leave imei24 unbuilt and every
+ * deep section `unavailable(provider_not_configured)` -- which looks like a supplier outage, not a
+ * misconfiguration -- so it throws instead, and the API and the worker both refuse to boot on it
+ * (R19). The message names the variables, never a value: one of them is a secret.
+ *
+ * Empty strings count as unset. The https check on the base URL stays with each caller's own
+ * config validation.
+ */
+export function imei24CredentialsFromEnv(env: {
+  readonly IMEI24_BASE_URL?: string | undefined;
+  readonly IMEI24_USERNAME?: string | undefined;
+  readonly IMEI24_API_KEY?: string | undefined;
+}): Imei24Credentials | undefined {
+  const username = env.IMEI24_USERNAME !== undefined && env.IMEI24_USERNAME !== '' ? env.IMEI24_USERNAME : undefined;
+  const apiKey = env.IMEI24_API_KEY !== undefined && env.IMEI24_API_KEY !== '' ? env.IMEI24_API_KEY : undefined;
+  if (username === undefined && apiKey === undefined) return undefined;
+  if (username === undefined || apiKey === undefined) {
+    throw new Error(
+      'IMEI24_USERNAME and IMEI24_API_KEY must be set together (or both left unset for the free tier only); ' +
+        `${username === undefined ? 'IMEI24_USERNAME' : 'IMEI24_API_KEY'} is missing.`,
+    );
+  }
+  return { baseUrl: env.IMEI24_BASE_URL ?? IMEI24_DEFAULT_BASE_URL, username, apiKey };
+}
+
 export interface BuiltProviders {
   readonly providers: Provider[];
   readonly catalogue: readonly CatalogueService[];

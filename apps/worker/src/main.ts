@@ -6,6 +6,7 @@ import {
   Metrics,
   PgRepositories,
   createPool,
+  imei24CredentialsFromEnv,
   type Imei24Credentials,
 } from '@imei-check/core';
 import type { Provider } from '@imei-check/providers';
@@ -54,12 +55,20 @@ if (!IMEI24_BASE_URL.startsWith('https://')) {
   process.exit(1);
 }
 
-const imei24Username = process.env['IMEI24_USERNAME'];
-const imei24ApiKey = process.env['IMEI24_API_KEY'];
-const imei24: Imei24Credentials | undefined =
-  imei24Username !== undefined && imei24ApiKey !== undefined
-    ? { baseUrl: IMEI24_BASE_URL, username: imei24Username, apiKey: imei24ApiKey }
-    : undefined;
+// Both or neither: half-set credentials are refused, exactly as the API refuses them (R19) --
+// silently skipping them would leave orders placed by the API that this worker can never poll.
+let imei24: Imei24Credentials | undefined;
+try {
+  imei24 = imei24CredentialsFromEnv({
+    IMEI24_BASE_URL,
+    IMEI24_USERNAME: process.env['IMEI24_USERNAME'],
+    IMEI24_API_KEY: process.env['IMEI24_API_KEY'],
+  });
+} catch (error) {
+  // The message names the variables only, never a value.
+  logger.error(error instanceof Error ? error.message : 'invalid imei24 credentials');
+  process.exit(1);
+}
 
 const repos = new PgRepositories(
   createPool(DATABASE_URL, {
