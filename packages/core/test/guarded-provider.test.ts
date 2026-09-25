@@ -100,4 +100,18 @@ describe('GuardedProvider', () => {
     const p = new GuardedProvider(inner, { lock: repos.locks, lockWaitMs: 100, dailySpendUsd: 10, costSince: async () => 0 });
     expect(p.poll).toBeUndefined();
   });
+
+  it('forwards parseWebhook unlocked (it makes no supplier call), and leaves it undefined when the inner has none', async () => {
+    const repos = new MemoryRepositories();
+    const inner = new Slow(1);
+    expect(new GuardedProvider(inner, { lock: repos.locks, lockWaitMs: 100, dailySpendUsd: 10, costSince: async () => 0 }).parseWebhook).toBeUndefined();
+
+    const parsed = { referenceId: 'r', outcome: { kind: 'answered', fields: [], misses: [] } } as const;
+    const withHook = Object.assign(new Slow(1), { parseWebhook: async () => parsed });
+    const p = new GuardedProvider(withHook, { lock: repos.locks, lockWaitMs: 100, dailySpendUsd: 10, costSince: async () => 0 });
+    // A webhook is an inbound POST: taking the one-job lock for it would starve real calls.
+    await repos.locks.withLock('provider:imei24', 1_000, async () => {
+      expect(await p.parseWebhook?.({ headers: {}, rawBody: Buffer.alloc(0) })).toBe(parsed);
+    });
+  });
 });

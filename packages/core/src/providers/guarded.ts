@@ -1,8 +1,10 @@
 import type {
   CatalogueService,
   ExecuteRequest,
+  ParsedWebhook,
   Provider,
   ProviderOutcome,
+  WebhookInput,
 } from '@imei-check/providers';
 import type { ProviderLock } from '../db/types.js';
 
@@ -38,6 +40,8 @@ export class GuardedProvider implements Provider {
     signal: AbortSignal,
   ) => Promise<ProviderOutcome>;
   readonly health?: (signal: AbortSignal) => Promise<{ balanceUsd?: number; reachable: boolean }>;
+  /** Unlocked: parsing an inbound webhook makes no call to the supplier. Same conditional rule. */
+  readonly parseWebhook?: (input: WebhookInput) => Promise<ParsedWebhook>;
 
   constructor(
     private readonly inner: Provider,
@@ -49,6 +53,11 @@ export class GuardedProvider implements Provider {
     if (innerPoll !== undefined) {
       this.poll = (orderReference, service, signal) =>
         this.locked(() => innerPoll.call(inner, orderReference, service, signal));
+    }
+
+    const innerParse = inner.parseWebhook;
+    if (innerParse !== undefined) {
+      this.parseWebhook = (input) => innerParse.call(inner, input);
     }
 
     const innerHealth = inner.health;
