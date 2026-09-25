@@ -15,6 +15,7 @@ import { tacRoutes } from './routes/tac.js';
 import { checkRoutes } from './routes/checks.js';
 import { deepCheckRoutes } from './routes/deep-checks.js';
 import { providerFeedbackRoutes } from './routes/provider-feedback.js';
+import { adminRoutes } from './routes/admin.js';
 import { authPlugin } from './auth/plugin.js';
 import { registerRawBody } from './lib/raw-body.js';
 import { refreshCircuitGauge, type AppServices } from './services.js';
@@ -107,20 +108,23 @@ export async function buildApp(deps: AppDeps) {
         if (key.revokedAt !== undefined && key.revokedAt <= now) return undefined;
         if (key.expiresAt !== undefined && key.expiresAt <= now) return undefined;
         const tenant = await services.repos.tenants.byId(key.tenantId);
-        return tenant === undefined ? undefined : { tenant, apiKeyId: key.id };
+        return tenant === undefined ? undefined : { tenant, apiKeyId: key.id, scopes: key.scopes };
       },
       onUsed: (id, at) => services.repos.apiKeys.touch(id, at),
     });
     // Lookup is free of charge, but not free of auth: with a database configured, this service
-    // has exactly one caller and nothing on it should be reachable without their key.
+    // has exactly one caller and nothing on it should be reachable without their key. It is also
+    // a `checks:write` route like every other check route -- the admin key must not reach it.
     await app.register(async (instance) => {
       instance.addHook('preHandler', instance.requireTenant);
+      instance.addHook('preHandler', instance.requireScope('checks:write'));
       await instance.register(imeiRoutes);
       await instance.register(tacRoutes);
     });
     await app.register(checkRoutes(services));
     await app.register(deepCheckRoutes(services));
     await app.register(providerFeedbackRoutes(services));
+    await app.register(adminRoutes(services));
     app.get(
       '/metrics',
       { schema: { summary: 'Prometheus metrics.', tags: ['meta'], hide: true } },

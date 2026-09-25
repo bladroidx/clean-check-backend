@@ -115,6 +115,8 @@ export interface PaidHarness {
   readonly apiKey: string;
   readonly logs: { lines: string[]; raw(): string };
   auth(): { authorization: string };
+  /** A key holding ONLY `imei:reveal` -- refused on every check route, admitted on the reveal route. */
+  adminAuth(): { authorization: string };
 }
 
 export async function makePaidApp(options: {
@@ -169,6 +171,18 @@ export async function makePaidApp(options: {
     expiresAt: undefined,
   });
 
+  // Mirrors `seed:admin-key`: a key holding ONLY `imei:reveal`, never `checks:write` (ADR-0007).
+  const adminKey = generateApiKey(false);
+  await repos.apiKeys.insert({
+    id: 'key_admin',
+    tenantId: 'ten_test',
+    prefix: adminKey.prefix,
+    keySha256: adminKey.sha256,
+    scopes: ['imei:reveal'],
+    revokedAt: undefined,
+    expiresAt: undefined,
+  });
+
   const services = buildServices({
     repos,
     providers: options.providers ?? [new FakeProvider('fake', CLEAN)],
@@ -189,6 +203,7 @@ export async function makePaidApp(options: {
     apiKey: key.plaintext,
     logs: { lines, raw: () => lines.join('\n') },
     auth: () => ({ authorization: `Bearer ${key.plaintext}` }),
+    adminAuth: () => ({ authorization: `Bearer ${adminKey.plaintext}` }),
   };
 }
 

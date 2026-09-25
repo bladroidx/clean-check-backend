@@ -12,3 +12,4 @@ export * from './providers/build.js';
 export * from './providers/guarded.js';
 export * from './orders/settle.js';
 export * from './crypto/imei-cipher.js';
+export * from './crypto/reveal.js';

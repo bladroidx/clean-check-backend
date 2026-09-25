@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import pino from 'pino';
-import { ImeiInLogError, REDACTED, createLogger, guardString, guardValue } from '../src/lib/log.js';
+import { ImeiInLogError, REDACTED, createLogger, guardString, guardValue, serializers } from '../src/lib/log.js';
 import { SENTINEL } from './helpers.js';
 
 /**
@@ -124,5 +124,20 @@ describe('createLogger', () => {
     });
     expect(logger).toBeDefined();
     expect(lines).toBeDefined();
+  });
+});
+
+describe('res serializer', () => {
+  /**
+   * ADR-0007: the reveal route's 200 body is `{ check_id, imei }`. An allowlist that only ever
+   * emits `statusCode` is what keeps that body out of the request-completion log line without
+   * anyone having to remember to scrub it per route -- there is nothing to scrub because there is
+   * nothing else to emit.
+   */
+  it('emits only the status code, never a response body', () => {
+    const reply = { statusCode: 200, body: { check_id: 'chk_1', imei: SENTINEL } } as unknown as {
+      statusCode?: number;
+    };
+    expect(serializers.res(reply)).toEqual({ statusCode: 200 });
   });
 });

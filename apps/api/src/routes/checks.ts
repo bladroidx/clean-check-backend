@@ -28,7 +28,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
     app.post(
       '/v1/checks',
       {
-        preHandler: app.requireTenant,
+        preHandler: [app.requireTenant, app.requireScope('checks:write')],
         schema: {
           summary: 'Free check: offline data only. Never contacts a supplier.',
           tags: ['free'],
@@ -82,7 +82,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
     app.get(
       '/v1/checks/:id',
       {
-        preHandler: app.requireTenant,
+        preHandler: [app.requireTenant, app.requireScope('checks:write')],
         schema: {
           summary: 'Fetch a free check by id.',
           tags: ['free'],
@@ -104,7 +104,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
     app.post(
       '/v1/capabilities',
       {
-        preHandler: app.requireTenant,
+        preHandler: [app.requireTenant, app.requireScope('checks:write')],
         schema: {
           summary: 'What is checkable for a device and what it costs, before spending anything.',
           tags: ['paid'],

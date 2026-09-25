@@ -79,7 +79,13 @@ export interface LoggerOptions {
  * stays safe as those internals change: we name what may be logged rather than guessing what must
  * be stripped.
  */
-const serializers = {
+/**
+ * Exported so a test can assert the allowlist directly, without reaching into pino's internals to
+ * prove a negative -- in particular that `res` never echoes a response body. That matters most on
+ * `POST /v1/admin/checks/:id/imei/reveal` (ADR-0007): its 200 body carries the one thing that must
+ * never land in a log line.
+ */
+export const serializers = {
   req(request: { id?: string; method?: string; url?: string }) {
     return { id: request.id, method: request.method, url: request.url?.split('?')[0] };
   },

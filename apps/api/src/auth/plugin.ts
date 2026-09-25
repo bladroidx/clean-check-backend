@@ -18,11 +18,14 @@ declare module 'fastify' {
   interface FastifyRequest {
     tenant?: Tenant;
     apiKeyId?: string;
+    apiKeyScopes?: readonly string[];
   }
 }
 
 export interface AuthDeps {
-  lookup(sha256: string): Promise<{ tenant: Tenant; apiKeyId: string } | undefined>;
+  lookup(
+    sha256: string,
+  ): Promise<{ tenant: Tenant; apiKeyId: string; scopes: readonly string[] } | undefined>;
   onUsed?(apiKeyId: string, at: Date): Promise<void> | void;
 }
 
@@ -36,6 +39,7 @@ const UNAUTHORISED = {
 const plugin: FastifyPluginAsync<AuthDeps> = async (app: FastifyInstance, deps: AuthDeps) => {
   app.decorateRequest('tenant', undefined);
   app.decorateRequest('apiKeyId', undefined);
+  app.decorateRequest('apiKeyScopes', undefined);
 
   app.decorate('requireTenant', async (request: FastifyRequest, reply: FastifyReply) => {
     const presented = bearerFrom(request.headers.authorization);
@@ -61,11 +65,39 @@ const plugin: FastifyPluginAsync<AuthDeps> = async (app: FastifyInstance, deps: 
       });
     }
 
+    // ADR-0007: `checks:write` and `imei:reveal` are mutually exclusive. One leaked key that can
+    // both run checks AND read back IMEIs defeats the entire point of splitting the scopes -- so a
+    // key minted with both (an operator mistake, since the seed scripts never do this) is refused
+    // outright rather than allowed to exercise whichever scope a given route asks for.
+    if (found.scopes.includes('checks:write') && found.scopes.includes('imei:reveal')) {
+      return reply.code(403).send({
+        error: {
+          code: 'key_scope_conflict',
+          message: "This key holds both 'checks:write' and 'imei:reveal'. Split it into two keys.",
+          request_id: request.id,
+        },
+      });
+    }
+
     request.tenant = found.tenant;
     request.apiKeyId = found.apiKeyId;
+    request.apiKeyScopes = found.scopes;
     // Fire-and-forget: a last-used timestamp is an operator convenience and must never be the
     // reason a paid check fails.
     void deps.onUsed?.(found.apiKeyId, new Date());
+    return undefined;
+  });
+
+  app.decorate('requireScope', (scope: string) => async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!(request.apiKeyScopes ?? []).includes(scope)) {
+      return reply.code(403).send({
+        error: {
+          code: 'insufficient_scope',
+          message: `This key lacks the '${scope}' scope.`,
+          request_id: request.id,
+        },
+      });
+    }
     return undefined;
   });
 };
@@ -75,6 +107,7 @@ export const authPlugin = fp(plugin, { name: 'imei-auth' });
 declare module 'fastify' {
   interface FastifyInstance {
     requireTenant(request: FastifyRequest, reply: FastifyReply): Promise<unknown>;
+    requireScope(scope: string): (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
   }
 }
 
@@ -85,4 +118,13 @@ export function tenantOf(request: FastifyRequest): Tenant {
     throw new Error('tenantOf called on a route that is not behind requireTenant');
   }
   return tenant;
+}
+
+/** Narrows the optional decoration for handlers that ran behind `requireTenant`. */
+export function apiKeyIdOf(request: FastifyRequest): string {
+  const apiKeyId = request.apiKeyId;
+  if (apiKeyId === undefined) {
+    throw new Error('apiKeyIdOf called on a route that is not behind requireTenant');
+  }
+  return apiKeyId;
 }

@@ -25,7 +25,9 @@
     "dev:worker": "npm -w @imei-check/worker run dev",
     "api:test:paid": "cd bruno && bru run --env Local -r --tags paid",
     "seed:dev": "node --env-file-if-exists=.env scripts/seed-dev-tenant.mjs",
-    "seed:service-tenant": "node --env-file-if-exists=.env scripts/seed-service-tenant.mjs"
+    "seed:service-tenant": "node --env-file-if-exists=.env scripts/seed-service-tenant.mjs",
+    "seed:admin-key": "node --env-file-if-exists=.env scripts/seed-admin-key.mjs",
+    "imei:reveal": "node --env-file-if-exists=.env scripts/imei-reveal.mjs"
   },
   "devDependencies": {
     "@types/js-yaml": "4.0.9",
