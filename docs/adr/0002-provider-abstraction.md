@@ -50,3 +50,17 @@ and we shop for one who says clean, a reseller with an API key simply retries un
 - `.dependency-cruiser.cjs` keeps `providers` from importing `apps/`.
 - Contract tests assert only `assemble.ts` constructs a `SectionResult`.
 - Per-provider 15-case fixture matrix; see `.claude/skills/provider-adapter-authoring/SKILL.md`.
+
+## Amended 2026-09-25
+
+The operator chose imei24 (pro.imei24.com, over the existing `DhruLegacyProvider`) as the **sole**
+paid supplier for the free-`/v1/checks`-plus-paid-`/v1/deep_checks` phase — see
+`docs/superpowers/specs/2026-09-25-deep-checks-imei24-design.md` §1 ("imei24 is the only upstream.
+Suppliers `alpha` and `beta` are removed."). The "two providers per paid capability" consequence
+above is therefore relaxed to **at least one enabled service per claimed capability** for the
+duration of this phase: `packages/providers/test/catalogue.test.ts`'s "every claimed capability is
+backed by at least one enabled service" test enforces the relaxed form.
+
+This is a deliberate, temporary trade, not a retraction of the underlying risk: a single-sourced
+capability is still a business risk. The `>=2` gate must be restored the moment a second provider's
+catalogue is added.

@@ -134,29 +134,31 @@ describe('the shipped catalogue', () => {
   });
 
   /**
-   * ADR-0002 calls two providers per paid capability a launch requirement, to survive one
-   * supplier's upstream access being revoked on a Friday. This build is deliberately
-   * single-supplier: CLAUDE.md ("The four-arm contract" preamble) names imei24 as *the* sole paid
-   * supplier for this phase, served by the pre-existing `DhruLegacyProvider`. Skipped rather than
-   * deleted or weakened, so the ADR-0002 gate reactivates the moment a second provider's catalogue
-   * lands instead of silently staying green forever.
+   * ADR-0002 originally called two providers per paid capability a launch requirement, to survive
+   * one supplier's upstream access being revoked on a Friday. Amended 2026-09-25 (see
+   * `docs/adr/0002-provider-abstraction.md` § "Amended 2026-09-25" and
+   * `docs/superpowers/specs/2026-09-25-deep-checks-imei24-design.md` §1): the operator chose imei24
+   * as the sole supplier for this phase, so the gate is relaxed from >=2 to >=1 -- every claimed
+   * capability must still be backed by at least one ENABLED service, so a capability that is
+   * claimed but disabled (or claimed and misspelled) is still caught at boot. This must be
+   * restored to the >=2 form the moment a second provider's catalogue is added.
    */
-  it.skip('has at least two providers for every paid capability (ADR-0002; deferred while imei24 is the sole supplier)', () => {
+  it('every claimed capability is backed by at least one enabled service (ADR-0002, amended)', () => {
     const byCapability = new Map<string, Set<string>>();
     for (const service of services) {
+      if (!service.enabled) continue;
       for (const capability of service.capabilities) {
         const providers = byCapability.get(capability) ?? new Set();
         providers.add(service.providerId);
         byCapability.set(capability, providers);
       }
     }
-    const singleSourced = [...byCapability.entries()]
-      .filter(([, providers]) => providers.size < 2)
-      .map(([capability]) => capability);
+    const claimedAnywhere = new Set(services.flatMap((s) => s.capabilities));
+    const unbacked = [...claimedAnywhere].filter((capability) => !byCapability.has(capability));
 
     expect(
-      singleSourced,
-      `single-sourced capabilities: ${singleSourced.join(', ')}. Add a second supplier before launch.`,
+      unbacked,
+      `capabilities with no enabled service: ${unbacked.join(', ')}.`,
     ).toEqual([]);
   });
 

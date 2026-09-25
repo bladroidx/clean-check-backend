@@ -11,7 +11,10 @@ import type { FieldLexicon, Lexicon } from './lexicon.js';
 
 const BLACKLIST: FieldLexicon = {
   field: 'blacklist.status',
-  labels: ['Blacklist Status', 'Blacklist', 'GSMA Status', 'Blacklist status', 'Lost/Stolen', 'Status'],
+  // A bare 'Status' label is deliberately NOT in this list: it is shared vocabulary (order status,
+  // warranty status, an order's overall STATUS field) and would capture an unrelated "Status" line
+  // as though it were the blacklist answer. Every label here names blacklist specifically.
+  labels: ['Blacklist Status', 'Blacklist', 'GSMA Status', 'Blacklist status', 'Lost/Stolen'],
   values: [
     { match: 'blacklisted', value: 'blocked' },
     { match: 'lost', value: 'blocked' },

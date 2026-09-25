@@ -61,4 +61,18 @@ describe('imei24 lexicons ship with no known-good phrases', () => {
     expect(outcome.fields.some((f) => f.field === 'warranty.purchase_date')).toBe(false);
     expect(outcome.misses).toEqual([]);
   });
+
+  /**
+   * 'Status' alone is shared vocabulary (order status, warranty status, ...), not a blacklist
+   * label. A bare "Status;Blacklisted" line with no recognised blacklist label must be ignored --
+   * not read as `blacklist.status`, and not even reported as a miss, since the label itself is
+   * unrecognised (silent), which is a different case from a recognised label with an unrecognised
+   * value (loud). See imei24-lexicons.ts's BLACKLIST comment.
+   */
+  it('a bare "Status" label is not read as the blacklist answer', () => {
+    const outcome = provider.interpret(body('ambiguous-status-label.json'), svc('486'));
+    if (outcome.kind !== 'answered') throw new Error('unexpected ' + outcome.kind);
+    expect(outcome.fields.find((f) => f.field === 'blacklist.status')).toBeUndefined();
+    expect(outcome.misses.map((m) => m.field)).not.toContain('blacklist.status');
+  });
 });
