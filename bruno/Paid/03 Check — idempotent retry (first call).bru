@@ -1,5 +1,5 @@
 meta {
-  name: Check — idempotent retry (first call)
+  name: Deep check — idempotent retry (first call)
   type: http
   seq: 3
   tags: [
@@ -8,7 +8,7 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/v1/checks
+  url: {{baseUrl}}/v1/deep_checks
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ headers {
 body:json {
   {
     "imei": "{{validImei}}",
-    "capabilities": ["identity.model"]
+    "capabilities": ["blacklist.gsma"]
   }
 }
 
@@ -52,7 +52,7 @@ tests {
 }
 
 docs {
-  Half of the idempotency test — see **04 Check — idempotent retry (replay)**, which sends the
+  Half of the idempotency test — see **04 Deep check — idempotent retry (replay)**, which sends the
   exact same `Idempotency-Key` and asserts the check id is unchanged and nothing was charged
   either time.
 

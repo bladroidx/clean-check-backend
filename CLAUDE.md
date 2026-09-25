@@ -47,14 +47,24 @@ open circuit only. If provider A says "blacklisted", do not shop for one who say
 
 ## Privacy
 
-- **Raw IMEI is never stored, never logged, never in an error message.** Masked (`35•••••••••••78`)
-  or hashed only. Enforced by the sentinel test, not by review.
+- **Raw IMEI is never stored in plaintext, never logged, never in an error message.** Masked
+  (`35•••••••••••78`) or hashed in every column and every response. Enforced by the sentinel test,
+  not by review.
+- **Every check stores its IMEI AES-256-GCM encrypted (ADR-0007)** — `checks.imei_encrypted` /
+  `imei_key_version`, on top of the hash, not instead of it. Only an `imei:reveal`-scoped key on
+  `POST /v1/admin/checks/:id/imei/reveal`, or `npm run imei:reveal` on a trusted host, can decrypt
+  it — one shared code path (`packages/core/src/crypto/reveal.ts`) that writes an append-only audit
+  row (`imei_reveals`, reason scrubbed of IMEI-shaped digits) **before** it ever decrypts. A key
+  holding both `imei:reveal` and `checks:write` is refused outright: the service key can never
+  reach the reveal route. See `docs/privacy.md`.
 - Two hashes: internal cache/dedupe/abuse key is `HMAC-SHA256(SERVER_PEPPER, digits)`, never
   returned. The `subject.imei_hash` we return is `HMAC-SHA256(tenant_salt, digits)` so a tenant can
-  correlate their own records and no one else's.
+  correlate their own records and no one else's. (The parsing rule above is unchanged by any of
+  this — encryption is a storage decision, not a normalisation one.)
 - `Imei.saltedHash` is a verbatim port of the Kotlin for golden-vector parity. **Compat only** —
   do not use it for server keys.
-- The process refuses to boot if `SERVER_PEPPER` is under 32 bytes.
+- The process refuses to boot if `SERVER_PEPPER` is under 32 bytes, or if `IMEI_ENCRYPTION_KEYS` is
+  missing or malformed once `DATABASE_URL` is set.
 
 ## Money
 
@@ -72,6 +82,18 @@ What still matters even with no billing:
   bill, but still real money leaving the business.
 - The global cross-tenant field cache (`packages/core/src/cache/store.ts`) is untouched and still
   the thing that keeps supplier spend down; it just no longer has a customer-facing price.
+- imei24 (the one supplier wired up) has its own real-money guard independent of billing:
+  `IMEI24_DAILY_SPEND_USD` (default `10`) caps daily spend; past it a section is
+  `unavailable(spend_cap_reached)`, never a silent overspend.
+
+## Routes
+
+Free, offline: `POST /v1/checks` + `GET /v1/checks/:id` — IMEI validation and TAC identity only;
+anything else comes back `unavailable(requires_deep_check)`. Deep, supplier-backed:
+`POST /v1/deep_checks` + `GET /v1/deep_checks/:id` — defaults to `['blacklist.gsma']`;
+`identity.model` here is `400 capability_not_in_tier`. `POST /v1/deep_checks` is bounded by one
+total time budget from request start (`DEEP_CHECK_WAIT_MS`, default 10 s, max 12 s); past it a
+pending section is `inconclusive(awaiting_provider)` with the poll route as its remedy.
 
 ## Layout
 
@@ -90,8 +112,12 @@ construct a `detail` that never passed through the transport's scrubber.
 ## Commands
 
 `npm test` · `npm run typecheck` · `npm run boundaries` · `/quality` for the full gate · `/leaks`
-before any merge that touches logging, persistence or a provider.
+before any merge that touches logging, persistence or a provider. `npm run seed:admin-key` mints
+the `imei:reveal`-only key; `npm run imei:reveal -- <check_id> --reason "..."` reveals from a
+trusted host (same 10–500 char reason bound as the HTTP route). imei24's brand-specific services
+key off `applies_to_manufacturers`, matched against the TAC directory at runtime — there is no
+generated prefix list or script for it (see ADR-0002 / catalogue YAML comments; ruling R7).
 
-The paid routes exist only when `DATABASE_URL` is set. Without it the service runs the free
+The deep routes exist only when `DATABASE_URL` is set. Without it the service runs the free
 offline tier — a supported mode, not a degraded one. Once `DATABASE_URL` is set, every route,
 including the free ones, requires the single seeded API key: there is exactly one caller.

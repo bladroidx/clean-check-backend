@@ -1,6 +1,6 @@
 # 0007 — Encrypted IMEI at rest, revealable only by an audited admin action
 
-**Status:** Proposed · 2026-09-25
+**Status:** Accepted · 2026-09-25
 **Amends:** ADR-0003 ("Raw IMEI never persists")
 
 ## Context
@@ -62,8 +62,11 @@ Two ways to reveal, one code path:
 ### Audit
 
 `imei_reveals` (append-only, enforced by trigger): `id, check_id, actor ('api:<key_id>' | 'cli'),
-reason, revealed_at`. The audit row is written **before** decryption, in the same transaction as
-the read; if it cannot be written, nothing is decrypted.
+reason, revealed_at`. The audit row is **written before decryption; if it cannot be written,
+nothing is decrypted** — the implementation is sequential, not transactional: `revealImei`
+(`packages/core/src/crypto/reveal.ts`) writes the audit row and lets that write's failure propagate
+before it ever calls `cipher.decrypt`. `reason` is scrubbed of IMEI-shaped digit runs before it is
+stored, so a caller who types the device number into the reason field does not undo ADR-0003.
 
 ### Retention
 

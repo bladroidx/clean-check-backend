@@ -76,12 +76,21 @@ This is a genuinely supported mode (milestone M0), not a degraded one — it cos
 (`npm run seed:service-tenant`), Bearer auth required on *every* route including the free ones
 above, billing removed entirely (nothing is ever charged):
 
-- `POST /v1/checks` — the full report. Mandatory `Idempotency-Key`.
-- `GET /v1/checks/:id` — fetch a check, including sections answered asynchronously since
-- `POST /v1/capabilities` — what is checkable for a device, before running anything
-- `GET /metrics` — Prometheus
+- `POST /v1/checks` — free, offline. IMEI validation + TAC identity only; any other capability
+  comes back `unavailable(requires_deep_check)`. Mandatory `Idempotency-Key`.
+- `GET /v1/checks/:id` — fetch a free check.
+- `POST /v1/deep_checks` — the supplier-backed report (blacklist, lock, warranty), via imei24.
+  Defaults to `['blacklist.gsma']` when no capability is named; `identity.model` is refused here
+  (`400 capability_not_in_tier`). Bounded by one total time budget from request start
+  (`DEEP_CHECK_WAIT_MS`, default 10 s); past it the section is `inconclusive(awaiting_provider)`.
+  Mandatory `Idempotency-Key`.
+- `GET /v1/deep_checks/:id` — fetch a deep check, or poll one still pending.
+- `POST /v1/capabilities` — what is checkable for a device, before running anything.
+- `POST /v1/admin/checks/:id/imei/reveal` — decrypt a stored check's IMEI (ADR-0007). Needs the
+  separate `imei:reveal` scope, never `checks:write`; audited before every decrypt.
+- `GET /metrics` — Prometheus.
 
-Supplier credentials are optional even here. With none configured, paid-shaped sections come back
+Supplier credentials are optional even here. With none configured, deep-check sections come back
 `unavailable(provider_not_configured)` and every contract guarantee still holds.
 
 ## Layout

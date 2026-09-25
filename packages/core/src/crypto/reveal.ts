@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { scrub } from '@imei-check/providers';
 import type { Repositories } from '../db/types.js';
 import type { ImeiCipher } from './imei-cipher.js';
 
@@ -40,11 +41,16 @@ export async function revealImei(deps: RevealImeiDeps, args: RevealImeiArgs): Pr
 
   // Audit BEFORE decrypt. If this throws (e.g. the append-only table rejects the write, or the
   // database is unreachable), it propagates to the caller and `cipher.decrypt` below never runs.
+  //
+  // The reason is free text a caller typed, and free text is exactly where a raw IMEI leaks in --
+  // "reveal because <the device's IMEI> was reported stolen" would otherwise sit in `imei_reveals`
+  // forever. Scrub it with the same IMEI-shaped-digit-run rule the providers use before it is ever
+  // written, not after.
   await deps.repos.reveals.record({
     id: `rev_${randomUUID()}`,
     checkId: args.checkId,
     actor: args.actor,
-    reason: args.reason,
+    reason: scrub(args.reason),
     revealedAt: (deps.now ?? (() => new Date()))(),
   });
 

@@ -1,5 +1,5 @@
 meta {
-  name: Check — fetch by id
+  name: Deep check — fetch by id
   type: http
   seq: 2
   tags: [
@@ -8,7 +8,7 @@ meta {
 }
 
 get {
-  url: {{baseUrl}}/v1/checks/{{lastCheckId}}
+  url: {{baseUrl}}/v1/deep_checks/{{lastCheckId}}
   body: none
   auth: none
 }
@@ -37,12 +37,12 @@ tests {
 }
 
 docs {
-  Run **01 Check — full report** first — it saves `check_id` into the runtime variable
+  Run **01 Deep check — full report** first — it saves `check_id` into the runtime variable
   `lastCheckId` that this request reads.
 
-  This is how a caller picks up a check that went `status: "partial"` because a standard
-  (non-express) supplier order is still outstanding: poll this endpoint until `status` reads
-  `"complete"`.
+  This is how a caller picks up a check that came back `inconclusive(awaiting_provider)` because
+  `DEEP_CHECK_WAIT_MS` ran out before imei24 answered: poll this endpoint (never the supplier
+  again) until the section resolves.
 
   A check id that exists but belongs to a different tenant returns 404, not 403 — the same
   reasoning as the auth 401: telling an attacker "that id exists but isn't yours" is a

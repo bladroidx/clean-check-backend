@@ -1,5 +1,5 @@
 meta {
-  name: Check — idempotent retry (replay)
+  name: Deep check — idempotent retry (replay)
   type: http
   seq: 4
   tags: [
@@ -8,7 +8,7 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/v1/checks
+  url: {{baseUrl}}/v1/deep_checks
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ headers {
 body:json {
   {
     "imei": "{{validImei}}",
-    "capabilities": ["identity.model"]
+    "capabilities": ["blacklist.gsma"]
   }
 }
 
@@ -44,7 +44,7 @@ tests {
 }
 
 docs {
-  Run **03 Check — idempotent retry (first call)** first — it generates the shared
+  Run **03 Deep check — idempotent retry (first call)** first — it generates the shared
   `retryIdempotencyKey`. This request replays the identical `Idempotency-Key`, same IMEI, same
   capabilities, and the response must be the FIRST response replayed verbatim, not a second paid
   check — even though nothing is charged either way in single-consumer mode, a recomputed replay

@@ -102,6 +102,16 @@ describe('POST /v1/admin/checks/:id/imei/reveal', () => {
     expect(res.json().error.code).toBe('imei_not_stored');
   });
 
+  it('R15(a): a raw IMEI typed into the reason is scrubbed before it is stored', async () => {
+    const h = await makePaidApp();
+    const check = (await postFree(h)).json<CheckReport>();
+    const res = await reveal(h, check.check_id, h.adminAuth(), `reported stolen, confirmed imei ${SENTINEL} by owner`);
+    expect(res.statusCode).toBe(200);
+    const [row] = await h.repos.reveals.forCheck(check.check_id);
+    expect(row?.reason).not.toContain(SENTINEL);
+    expect(row?.reason).toContain('[REDACTED-IMEI]');
+  });
+
   it('reason under 10 chars is 400', async () => {
     const h = await makePaidApp();
     const check = (await postFree(h)).json<CheckReport>();

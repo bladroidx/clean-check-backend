@@ -1,9 +1,93 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import {
+  BUILTIN_LEXICONS,
+  DhruLegacyProvider,
+  loadCatalogueFile,
+  type CatalogueService,
+  type ExecuteRequest,
+  type ProviderOutcome,
+} from '@imei-check/providers';
 import type { App } from '../src/app.js';
 import { SENTINEL, UNKNOWN_TAC_IMEI, makeApp } from './helpers.js';
 import { BLOCKED, CLEAN, FakeProvider, REWORDED, TIMEOUT, idempotencyKey, makePaidApp } from './paid-helpers.js';
+
+/**
+ * Drives the deep path with a REAL `DhruLegacyProvider` over the imei24 doc-derived fixtures
+ * (`packages/providers/test/fixtures/imei24/`), so the sentinel exercises the actual
+ * extract/lexicon `scrub()` pipeline instead of a fake that never touches it. Network is replaced,
+ * not the interpreter: `execute`/`poll` call `interpret()` on a fixture body directly, exactly as
+ * `imei24-catalogue.test.ts` does, with `[REDACTED-IMEI]` swapped for the sentinel at runtime so no
+ * source file ever contains the digits literally.
+ */
+class FixtureImei24Provider extends DhruLegacyProvider {
+  constructor(
+    private readonly body: string,
+    services: readonly CatalogueService[],
+  ) {
+    super({
+      providerId: 'imei24',
+      baseUrl: 'https://pro.imei24.com',
+      username: 'u',
+      apiAccessKey: 'k',
+      services,
+      lexicons: BUILTIN_LEXICONS,
+    });
+  }
+  override async execute(request: ExecuteRequest): Promise<ProviderOutcome> {
+    return this.interpret(this.body, request.service);
+  }
+  override async poll(_orderReference: string, service: CatalogueService): Promise<ProviderOutcome> {
+    return this.interpret(this.body, service);
+  }
+}
+
+const IMEI24_CATALOGUE = resolve(import.meta.dirname, '..', '..', '..', 'packages', 'providers', 'catalogue', 'imei24.yaml');
+const IMEI24_FIXTURES = resolve(import.meta.dirname, '..', '..', '..', 'packages', 'providers', 'test', 'fixtures', 'imei24');
+const imei24Services = loadCatalogueFile(IMEI24_CATALOGUE);
+const blacklistService = imei24Services.find((s) => s.serviceId === '486');
+if (blacklistService === undefined) throw new Error('imei24.yaml no longer has service 486');
+
+/** The doc-derived "Blacklisted" fixture, with an IMEI line prepended so RESULT echoes it. */
+function resultEchoBody(): string {
+  const fixture = JSON.parse(readFileSync(join(IMEI24_FIXTURES, 'blacklist-blacklisted.json'), 'utf8')) as {
+    SUCCESS: Array<{ STATUS: string; RESULT: string }>;
+  };
+  const [record] = fixture.SUCCESS;
+  if (record === undefined) throw new Error('fixture has no SUCCESS record');
+  return JSON.stringify({
+    SUCCESS: [{ STATUS: record.STATUS, RESULT: `IMEI;${SENTINEL}\n${record.RESULT}` }],
+  });
+}
+
+/** The doc-derived "not found" fixture, with the sentinel echoed into MESSAGE instead of RESULT. */
+function messageEchoBody(): string {
+  const fixture = JSON.parse(readFileSync(join(IMEI24_FIXTURES, 'not-found.json'), 'utf8')) as {
+    STATUS: string;
+    MESSAGE: string;
+  };
+  return JSON.stringify({ ...fixture, MESSAGE: `${fixture.MESSAGE} (imei ${SENTINEL})` });
+}
+
+/**
+ * `JSON.stringify` on a `Buffer` (e.g. `checks.imei_encrypted`) yields `{"type":"Buffer","data":[...]}`
+ * -- a comma-separated array of byte integers, never the contiguous digit run the repo scan looks
+ * for. Re-encoding it as base64 first is the stricter check the brief asks for: a base64 alphabet
+ * digit run is exactly the shape that COULD coincidentally read as part of an IMEI, so it is worth
+ * checking explicitly rather than trusting that the default array form never will.
+ */
+function stringifyWithBase64Buffers(value: unknown): string {
+  const replace = (input: unknown): unknown => {
+    if (Buffer.isBuffer(input)) return input.toString('base64');
+    if (Array.isArray(input)) return input.map(replace);
+    if (input !== null && typeof input === 'object') {
+      return Object.fromEntries(Object.entries(input as Record<string, unknown>).map(([k, v]) => [k, replace(v)]));
+    }
+    return input;
+  };
+  return JSON.stringify(replace(value));
+}
 
 /**
  * The sentinel test.
@@ -144,6 +228,10 @@ describe('sentinel IMEI', () => {
 
       const record = await harness.repos.checks.byId('ten_test', checkId);
       expect(JSON.stringify(record)).not.toContain(SENTINEL);
+      // ADR-0007: the row now carries imei_encrypted as a Buffer. Re-serialise with it as base64
+      // rather than JSON.stringify's default {"type":"Buffer","data":[...]} array form -- the
+      // stricter of the two shapes to check the ciphertext against.
+      expect(stringifyWithBase64Buffers(record)).not.toContain(SENTINEL);
 
       // The cache is keyed on the INTERNAL hash, never the digits.
       const cached = await harness.repos.cache.get(`${SENTINEL}:blacklist.status`);
@@ -193,6 +281,62 @@ describe('sentinel IMEI', () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).not.toContain(SENTINEL);
     expect(harness.logs.raw()).not.toContain(SENTINEL);
+    await harness.app.close();
+  });
+
+  it('drives the real imei24 interpreter over doc-derived fixtures echoing the sentinel in RESULT and MESSAGE', async () => {
+    for (const body of [resultEchoBody(), messageEchoBody()]) {
+      const harness = await makePaidApp({
+        providers: [new FixtureImei24Provider(body, [blacklistService])],
+      });
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/v1/deep_checks',
+        headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
+        payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.body).not.toContain(SENTINEL);
+      expect(harness.logs.raw()).not.toContain(SENTINEL);
+
+      const checkId = response.json().check_id as string;
+      const stored = await harness.repos.checks.sections(checkId);
+      expect(JSON.stringify(stored)).not.toContain(SENTINEL);
+      const record = await harness.repos.checks.byId('ten_test', checkId);
+      expect(stringifyWithBase64Buffers(record)).not.toContain(SENTINEL);
+
+      await harness.app.close();
+    }
+  });
+
+  it('the reveal route is the one documented exception: it returns the sentinel, but never logs it', async () => {
+    const harness = await makePaidApp();
+    const free = await harness.app.inject({
+      method: 'POST',
+      url: '/v1/checks',
+      headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
+      payload: { imei: SENTINEL },
+    });
+    const checkId = free.json().check_id as string;
+
+    const reveal = await harness.app.inject({
+      method: 'POST',
+      url: `/v1/admin/checks/${checkId}/imei/reveal`,
+      headers: harness.adminAuth(),
+      payload: { reason: 'sentinel test: reveal is the one documented exception' },
+    });
+
+    expect(reveal.statusCode).toBe(200);
+    // The one and only response allowed to contain it.
+    expect(reveal.body).toContain(SENTINEL);
+    expect(harness.logs.raw()).not.toContain(SENTINEL);
+
+    // But the audit trail it left behind must not.
+    const audit = await harness.repos.reveals.forCheck(checkId);
+    expect(JSON.stringify(audit)).not.toContain(SENTINEL);
+
     await harness.app.close();
   });
 

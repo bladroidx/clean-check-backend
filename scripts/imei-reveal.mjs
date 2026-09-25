@@ -27,10 +27,19 @@ if (KEYS === undefined) {
 const args = process.argv.slice(2);
 const checkId = args[0];
 const reasonIndex = args.indexOf('--reason');
-const reason = reasonIndex >= 0 ? args[reasonIndex + 1] : undefined;
+const rawReason = reasonIndex >= 0 ? args[reasonIndex + 1] : undefined;
 
-if (checkId === undefined || checkId.startsWith('--') || reason === undefined) {
+if (checkId === undefined || checkId.startsWith('--') || rawReason === undefined) {
   console.error('Usage: node scripts/imei-reveal.mjs <check_id> --reason "<text>"');
+  process.exit(1);
+}
+
+// Same bound as the HTTP route's zod schema (apps/api/src/routes/admin.ts): the two entry points
+// to the one reveal code path must not accept an audit reason the other would refuse. Digit-free,
+// per this file's own rule -- the message never repeats what the caller typed.
+const reason = rawReason.trim();
+if (reason.length < 10 || reason.length > 500) {
+  console.error('--reason must be between 10 and 500 characters (after trimming).');
   process.exit(1);
 }
 

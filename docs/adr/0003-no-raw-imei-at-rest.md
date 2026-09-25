@@ -2,6 +2,7 @@
 
 **Status:** Accepted · 2026-09-12
 **Applies to:** every package, every table, every log line, `docs/privacy.md`
+**Amended by:** ADR-0007 (encrypted IMEI column)
 
 ## Context
 

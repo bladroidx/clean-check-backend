@@ -20,12 +20,16 @@ a stable schema, metadata that says exactly what an answer covers and doesn't, a
 [`CLAUDE.md`](../CLAUDE.md) for the one-paragraph version of why this matters; it is the thesis the
 whole codebase is built to defend.
 
-Two tiers:
+Two tiers, on two different routes:
 
-- **Free, offline.** IMEI validation (Luhn check), device identity from a bundled Type Allocation
-  Code (TAC) directory. No network call, no database required.
-- **Paid.** Blacklist status, carrier/activation/MDM lock, warranty. Requires an API key and calls
-  out to supplier APIs — "paid" names the capability tier, not a bill: billing was removed, see §7.
+- **Free, offline — `POST /v1/checks` / `GET /v1/checks/:id`.** IMEI validation (Luhn check),
+  device identity from a bundled Type Allocation Code (TAC) directory. No supplier call. A
+  capability that needs a supplier (blacklist, lock, warranty) comes back
+  `unavailable(requires_deep_check)` here — it never silently runs a paid lookup for free.
+- **Deep, supplier-backed — `POST /v1/deep_checks` / `GET /v1/deep_checks/:id`.** Blacklist status,
+  carrier/activation/MDM lock, warranty, via imei24 (the one supplier wired up so far). Requires an
+  API key; `identity.model` is refused here with `400 capability_not_in_tier` — it belongs on the
+  free route. "Paid" names the capability tier, not a bill: billing was removed, see §7.
 
 ---
 
@@ -82,21 +86,29 @@ wasn't the original plan and what broke to make it necessary.
 
 ---
 
-## 4. Request lifecycle — the paid path, end to end
+## 4. Request lifecycle — the deep path, end to end
 
-This is the path worth understanding first, because it's where every subsystem meets.
+This is the path worth understanding first, because it's where every subsystem meets. (The free
+`POST /v1/checks` path is the same shape minus the router/provider steps: identity/TAC only, and
+`unavailable(requires_deep_check)` for anything else.)
 
 ```
-POST /v1/checks
+POST /v1/deep_checks
   │
   ▼
 apps/api/src/auth/plugin.ts         Bearer key → SHA-256 lookup → tenant. Same 401 body whatever
   │                                  went wrong (unknown/revoked/expired key look identical). One
   │                                  seeded tenant in single-consumer mode — see §7.
   ▼
-apps/api/src/routes/checks.ts       Luhn-validate the IMEI FIRST (free). Claim the
+apps/api/src/routes/deep-checks.ts  Luhn-validate the IMEI FIRST (free). Claim the
   │                                  Idempotency-Key: if seen before, replay the stored response
-  │                                  verbatim and stop here.
+  │                                  verbatim and stop here. `identity.model` is refused here
+  │                                  (400 `capability_not_in_tier`) — free-route only. No
+  │                                  capabilities named → default `['blacklist.gsma']`. The whole
+  │                                  request is bounded by one total time budget from request
+  │                                  start (`DEEP_CHECK_WAIT_MS`, default 10 s, max 12 s); when it
+  │                                  runs out the section comes back `inconclusive(awaiting_provider)`
+  │                                  with a `GET /v1/deep_checks/:id` poll remedy, not an error.
   ▼
 apps/api/src/orchestrator/
   run-check.ts                      For each requested capability, in order:
@@ -107,7 +119,11 @@ apps/api/src/orchestrator/
   │   3. Cache miss → packages/providers' Router picks the cheapest provider that covers this
   │      TAC for this capability, executes it (or fails over — but ONLY on transport failure,
   │      never after a definite answer; see §6). No affordability gating: billing is off, so
-  │      every requested capability simply runs.
+  │      every requested capability simply runs. Every provider is wrapped in
+  │      `GuardedProvider` (`packages/core`): one imei24 job at a time (an advisory lock —
+  │      imei24 refuses concurrent orders), and today's spend against `IMEI24_DAILY_SPEND_USD`
+  │      (default $10) — over the cap comes back `unavailable(spend_cap_reached)`, not a silent
+  │      failover to a supplier that would just say the same thing.
   │   4. packages/core/src/report/assemble.ts turns the ProviderOutcome into a SectionResult:
   │      the one place in the whole codebase that decides pass/fail/inconclusive/unavailable.
   ▼
@@ -222,13 +238,26 @@ What's still true and still worth knowing:
 - `tenants`/`api_keys` still exist and are unrelated to this removal — see
   `apps/api/src/auth/plugin.ts` for the Bearer-key check every route now goes through once
   `DATABASE_URL` is set.
+- imei24 spend is capped independently of billing: `IMEI24_DAILY_SPEND_USD` (default $10) is a
+  real cost-control switch, not a customer-facing price — `GuardedProvider` refuses new orders
+  once today's `provider_calls` sum crosses it, and the section comes back
+  `unavailable(spend_cap_reached)` rather than a silent overspend or a stolen phone certified clean
+  because the supplier call never happened.
 
 ---
 
 ## 8. Privacy: the sentinel test and the log tripwire
 
 [ADR-0003](adr/0003-no-raw-imei-at-rest.md) is the design; here's how it's actually enforced, which
-is unusual enough to be worth explaining to a newcomer.
+is unusual enough to be worth explaining to a newcomer. [ADR-0007](adr/0007-encrypted-imei-at-rest.md)
+amends it: every check now stores its IMEI **encrypted** (`checks.imei_encrypted`, AES-256-GCM,
+`packages/core/src/crypto/imei-cipher.ts`), not merely hashed — the operator needed a way to answer
+"which phone was this?" after the fact, which a hash cannot do. The only way it comes back out is
+`packages/core/src/crypto/reveal.ts`'s `revealImei`, shared by the admin-scoped, audited
+`POST /v1/admin/checks/:id/imei/reveal` route (`imei:reveal` scope, refused to any key that also
+holds `checks:write`) and `npm run imei:reveal`. It writes the `imei_reveals` audit row **before**
+decrypting anything, and does not swallow that write's failure. See `docs/privacy.md` for the
+DSAR/erasure procedure and the imei24 processor disclosure.
 
 **The log tripwire** (`apps/api/src/lib/log.ts`): every string written to the log sink is scanned
 for a 14+ digit run that isn't a decimal fraction. Outside production, a match **throws** — an
