@@ -142,6 +142,31 @@ describe('pollDueOrders / pollOrders (shared order settlement)', () => {
     expect(cached?.value).toBe('clean');
   });
 
+  it('settles a pre-migration order with no stored imeiHash normally, but skips the cache write', async () => {
+    const repos = new MemoryRepositories();
+    const noHash = order({ imeiHash: '' });
+    await seed(repos, noHash);
+    const provider: Provider = {
+      id: 'imei24',
+      catalogue: () => [s486],
+      supports: () => s486,
+      execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+      poll: async () =>
+        ({ kind: 'answered', fields: [{ field: 'blacklist.status', value: 'clean' }], misses: [] }) as const,
+    };
+
+    const summary = await pollOrders(
+      { repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now },
+      [noHash],
+    );
+
+    expect(summary.answered).toBe(1);
+    const sections = await repos.checks.sections('chk_1');
+    expect(sections[0]?.outcome).toBe('pass');
+    // An empty key would make every hash-less order share one cache row, so nothing is written.
+    expect(await repos.cache.get(':blacklist.status')).toBeUndefined();
+  });
+
   it('does not settle a section on a transport failure, and retries with backoff', async () => {
     const repos = new MemoryRepositories();
     await seed(repos, order());

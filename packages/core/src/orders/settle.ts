@@ -122,8 +122,10 @@ export async function pollOrders(deps: SettleDeps, orders: readonly OrderRow[]):
 
     // The synchronous path caches whatever it learned even from a section that did not pass; the
     // async path never did, which meant a repeat check re-bought an answer we already had. Same
-    // write here, keyed on the check's own tenant-facing IMEI hash.
-    if (outcome.kind === 'answered') {
+    // write here, keyed on the check's own internal cache-key hash. A pre-Task-9 row has no stored
+    // hash (`imeiHash === ''`): writing under an empty key would make every such order share one
+    // cache row, so those orders settle their section normally but skip the cache write.
+    if (outcome.kind === 'answered' && order.imeiHash !== '') {
       await new FieldCache(deps.repos.cache).write({
         imeiHash: order.imeiHash,
         fields: outcome.fields,

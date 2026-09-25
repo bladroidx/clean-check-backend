@@ -150,10 +150,12 @@ export interface OrderRow {
   readonly referenceId: string;
   readonly orderReference: string | undefined;
   /**
-   * The tenant-facing IMEI hash for this order's check, so async settlement can write the field
-   * cache the same way the synchronous path does (Task 8). Task 9 adds the `imei_hash` column to
-   * `provider_orders`; until then a Postgres row reads back with `?? ''` rather than a value that
-   * was never stored.
+   * The INTERNAL cache/dedupe key hash for this order's check -- `HMAC-SHA256(SERVER_PEPPER,
+   * digits)`, never returned to a caller -- not the tenant-facing `subject.imei_hash` (which is
+   * salted per tenant and could not key a cross-tenant cache). Carried here so async settlement
+   * can write the field cache the same way the synchronous path does (Task 8). Task 9 adds the
+   * `imei_hash` column to `provider_orders`; until then a Postgres row reads back with `?? ''`
+   * rather than a value that was never stored.
    */
   readonly imeiHash: string;
   readonly status: 'pending' | 'answered' | 'rejected' | 'abandoned';
