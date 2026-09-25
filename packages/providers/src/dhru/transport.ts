@@ -124,3 +124,13 @@ const REJECTIONS: ReadonlyArray<readonly [RegExp, RejectionReason]> = [
 export function classifyRejection(message: string): RejectionReason | undefined {
   return REJECTIONS.find(([pattern]) => pattern.test(message))?.[1];
 }
+
+/**
+ * imei24 runs one job per API key; a second concurrent call is refused with this text rather than
+ * a device answer. Checked BEFORE `classifyRejection` -- the refusal names no device, so treating
+ * it as a rejection would misreport "we could not check you right now" as "this device is fine".
+ * The regex tolerates imei24's actual spelling ("workign") as well as the correct one.
+ */
+export function classifyBusy(message: string): boolean {
+  return /work(i|)g?n?\s+in\s+other\s+session|other\s+session/i.test(message);
+}

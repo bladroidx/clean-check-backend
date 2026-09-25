@@ -45,7 +45,7 @@ export interface FieldLexicon {
 
 export interface Lexicon {
   readonly providerId: string;
-  readonly serviceId: string;
+  readonly lexiconId: string;
   readonly entries: readonly FieldLexicon[];
 }
 
@@ -122,7 +122,7 @@ export function normalise(lexicon: Lexicon, pairs: readonly ExtractedPair[]): No
     if (resolved.kind === 'absent') continue;
 
     if (resolved.kind === 'unrecognised') {
-      misses.push({ field: entry.field, rawValue: pair.value, serviceId: lexicon.serviceId });
+      misses.push({ field: entry.field, rawValue: pair.value, serviceId: lexicon.lexiconId });
       continue;
     }
     values.set(entry.field, { value: resolved.value, rawLabel: pair.label });

@@ -142,7 +142,7 @@ describe('the parsing rule', () => {
   });
 
   it('does not let one service’s lexicon answer for another', () => {
-    const empty: Lexicon = { providerId: 'x', serviceId: 'y', entries: [] };
+    const empty: Lexicon = { providerId: 'x', lexiconId: 'y', entries: [] };
     const { values } = normalise(empty, extractPairs('Blacklist Status: Clean<br>'));
     expect(values.size).toBe(0);
   });

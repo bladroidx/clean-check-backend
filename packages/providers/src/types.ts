@@ -152,7 +152,7 @@ export interface Provider {
   supports(capability: Capability, tac: string): CatalogueService | undefined;
   execute(request: ExecuteRequest): Promise<ProviderOutcome>;
   /** Async suppliers only: ask again about an order we were told was pending. */
-  poll?(orderReference: string, signal: AbortSignal): Promise<ProviderOutcome>;
+  poll?(orderReference: string, service: CatalogueService, signal: AbortSignal): Promise<ProviderOutcome>;
   /** Async suppliers only: verify and decode an inbound feedback POST. Untrusted input. */
   parseWebhook?(input: WebhookInput): Promise<ParsedWebhook>;
   /** Balance and reachability, for reconciliation and /readyz-adjacent dashboards. */

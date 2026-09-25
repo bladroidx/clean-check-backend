@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher, type Dispatcher } from 'undici';
 import { DhruLegacyProvider } from '../src/dhru/legacy.js';
-import { DhruRestProvider } from '../src/dhru/rest.js';
 import { BUILTIN_LEXICONS } from '../src/normalise/lexicons.js';
-import { classifyRejection, ProviderTransportError, toFailure } from '../src/dhru/transport.js';
+import { classifyRejection, classifyBusy, ProviderTransportError, toFailure } from '../src/dhru/transport.js';
 import type { CatalogueService } from '../src/types.js';
 
 /**
@@ -19,7 +18,7 @@ const SENTINEL = '353104112345676';
 
 const service: CatalogueService = {
   serviceId: '12',
-  providerId: 'alpha',
+  providerId: 'dhru',
   displayName: 'blacklist',
   capabilities: ['blacklist.gsma'],
   fields: ['blacklist.status'],
@@ -49,7 +48,7 @@ afterEach(async () => {
 
 function legacy(): DhruLegacyProvider {
   return new DhruLegacyProvider({
-    providerId: 'alpha',
+    providerId: 'dhru',
     baseUrl: BASE,
     username: 'u',
     apiAccessKey: 'k',
@@ -58,7 +57,7 @@ function legacy(): DhruLegacyProvider {
   });
 }
 
-function execute(provider: DhruLegacyProvider | DhruRestProvider) {
+function execute(provider: DhruLegacyProvider) {
   return provider.execute({
     capability: 'blacklist.gsma',
     service,
@@ -155,81 +154,14 @@ describe('legacy transport over HTTP', () => {
     expect(await legacy().health(AbortSignal.timeout(5000))).toEqual({ reachable: false });
   });
 
-  it('polls an open order', async () => {
+  it('polls an open order for the service that placed it', async () => {
     agent
       .get(BASE)
       .intercept({ path: '/api/index.php', method: 'POST' })
       .reply(200, { SUCCESS: [{ STATUS: 'Available', RESULT: 'Blacklist Status: Clean' }] });
 
-    const outcome = await legacy().poll('order-1', AbortSignal.timeout(5000));
+    const outcome = await legacy().poll('order-1', service, AbortSignal.timeout(5000));
     expect(outcome.kind).toBe('answered');
-  });
-});
-
-describe('REST transport over HTTP', () => {
-  function rest(): DhruRestProvider {
-    return new DhruRestProvider({
-      providerId: 'beta',
-      baseUrl: BASE,
-      token: 'tok',
-      services: [service],
-      lexicons: BUILTIN_LEXICONS,
-    });
-  }
-
-  it('sends a bearer token and normalises the answer', async () => {
-    let auth = '';
-    agent
-      .get(BASE)
-      .intercept({ path: '/order', method: 'POST' })
-      .reply(200, (options) => {
-        auth = String((options.headers as Record<string, string>)['authorization'] ?? '');
-        return { status: 'success', result: { 'Blacklist Status': 'Clean' } };
-      });
-
-    const outcome = await execute(rest());
-    expect(auth).toBe('Bearer tok');
-    expect(outcome.kind).toBe('answered');
-  });
-
-  it('decodes a base64 replay payload', async () => {
-    agent
-      .get(BASE)
-      .intercept({ path: '/order', method: 'POST' })
-      .reply(200, {
-        status: 'success',
-        result: Buffer.from('Blacklist Status: Blacklisted<br>').toString('base64'),
-      });
-
-    const outcome = await execute(rest());
-    expect(outcome.kind).toBe('answered');
-    if (outcome.kind === 'answered') {
-      expect(outcome.fields[0]).toMatchObject({ field: 'blacklist.status', value: 'blocked' });
-    }
-  });
-
-  it('reads the account balance', async () => {
-    agent.get(BASE).intercept({ path: '/account', method: 'GET' }).reply(200, { balance: 12.25 });
-    expect(await rest().health(AbortSignal.timeout(5000))).toEqual({
-      balanceUsd: 12.25,
-      reachable: true,
-    });
-  });
-
-  it('polls an order by reference', async () => {
-    agent
-      .get(BASE)
-      .intercept({ path: '/order/abc', method: 'GET' })
-      .reply(200, { status: 'success', result: { 'Blacklist Status': 'Clean' } });
-
-    const outcome = await rest().poll('abc', AbortSignal.timeout(5000));
-    expect(outcome.kind).toBe('answered');
-  });
-
-  it('degrades a non-JSON body to failed', async () => {
-    agent.get(BASE).intercept({ path: '/order', method: 'POST' }).reply(200, '<html>nope</html>');
-    const outcome = await execute(rest());
-    expect(outcome.kind).toBe('failed');
   });
 });
 
@@ -252,5 +184,14 @@ describe('failure classification', () => {
     expect(classifyRejection('Something went terribly wrong')).toBeUndefined();
     expect(classifyRejection('Invalid IMEI')).toBe('invalid_imei');
     expect(classifyRejection('Device not supported')).toBe('device_not_supported');
+  });
+
+  /** imei24's actual spelling ("workign") and the correctly spelled form must both be caught. */
+  it('recognises the one-job-at-a-time busy refusal under either spelling', () => {
+    expect(classifyBusy('Your APIKEY is workign in other session. You can start again later')).toBe(
+      true,
+    );
+    expect(classifyBusy('Your APIKEY is working in other session')).toBe(true);
+    expect(classifyBusy('Invalid IMEI')).toBe(false);
   });
 });

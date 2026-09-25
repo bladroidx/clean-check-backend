@@ -8,5 +8,3 @@ export * from './normalise/lexicon.js';
 export * from './normalise/lexicons.js';
 export * from './dhru/transport.js';
 export * from './dhru/legacy.js';
-export * from './dhru/rest.js';
-export * from './imei24.js';

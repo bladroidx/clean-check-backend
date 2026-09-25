@@ -38,7 +38,7 @@ class PollableProvider implements Provider {
   async execute(): Promise<ProviderOutcome> {
     return this.outcome;
   }
-  async poll(): Promise<ProviderOutcome> {
+  async poll(_orderReference: string, _service: CatalogueService): Promise<ProviderOutcome> {
     this.polls += 1;
     return this.outcome;
   }

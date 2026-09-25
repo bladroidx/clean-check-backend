@@ -1,14 +1,10 @@
-import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { DhruRestProvider, type CatalogueService } from '@imei-check/providers';
-import { BUILTIN_LEXICONS } from '@imei-check/providers';
+import { type CatalogueService } from '@imei-check/providers';
 import { generateTenantSalt } from '@imei-check/core';
 import { CLEAN, FakeProvider, idempotencyKey, makePaidApp } from './paid-helpers.js';
 import { SENTINEL } from './helpers.js';
 import { ConcurrencyGate, TokenBucketLimiter } from '../src/abuse/ratelimit.js';
 import { bearerFrom, generateApiKey, hashApiKey, looksLikeApiKey } from '../src/auth/keys.js';
-
-const WEBHOOK_SECRET = 'a-shared-secret-for-webhook-signing';
 
 const service: CatalogueService = {
   serviceId: 'apple-gsx',
@@ -25,80 +21,17 @@ const service: CatalogueService = {
   enabled: true,
 };
 
-const beta = new DhruRestProvider({
-  providerId: 'beta',
-  baseUrl: 'https://example.invalid',
-  token: 't',
-  webhookSecret: WEBHOOK_SECRET,
-  services: [service],
-  lexicons: BUILTIN_LEXICONS,
-});
-
-function signed(body: string, secret = WEBHOOK_SECRET): { headers: Record<string, string>; rawBody: Buffer } {
-  return {
-    headers: { 'x-dhru-signature': createHmac('sha256', secret).update(body).digest('hex') },
-    rawBody: Buffer.from(body, 'utf8'),
-  };
-}
-
 /**
  * The inbound feedback webhook is an unauthenticated POST from the public internet claiming to be
  * a supplier telling us an answer. Every test here is an attempt to launder a stolen handset
  * through it.
+ *
+ * Signature verification itself is a property of a specific supplier's `parseWebhook`
+ * implementation (DHRU REST carried an HMAC; it was removed in Task 3 along with the REST
+ * adapter). What is generic -- and tested here -- is the route's behaviour: a well-formed but
+ * unmatched reference changes nothing, and a rejected payload leaks no detail about why.
  */
 describe('supplier feedback webhook', () => {
-  it('accepts a correctly signed payload', async () => {
-    const body = JSON.stringify({
-      reference_id: 'ref-1',
-      status: 'success',
-      replay: Buffer.from('Blacklist Status: Clean').toString('base64'),
-    });
-    const parsed = await beta.parseWebhook(signed(body));
-    expect(parsed.referenceId).toBe('ref-1');
-    expect(parsed.outcome.kind).toBe('answered');
-  });
-
-  it('refuses an unsigned payload', async () => {
-    const body = JSON.stringify({ reference_id: 'ref-1', status: 'success', replay: '' });
-    await expect(beta.parseWebhook({ headers: {}, rawBody: Buffer.from(body) })).rejects.toThrow();
-  });
-
-  /** The forgery this gate exists for. */
-  it('refuses a payload signed with the wrong secret', async () => {
-    const body = JSON.stringify({
-      reference_id: 'ref-1',
-      status: 'success',
-      replay: Buffer.from('Blacklist Status: Clean').toString('base64'),
-    });
-    await expect(beta.parseWebhook(signed(body, 'attacker-guess'))).rejects.toThrow();
-  });
-
-  it('refuses a payload whose body was altered after signing', async () => {
-    const original = JSON.stringify({ reference_id: 'ref-1', status: 'rejected' });
-    const tampered = JSON.stringify({
-      reference_id: 'ref-1',
-      status: 'success',
-      replay: Buffer.from('Blacklist Status: Clean').toString('base64'),
-    });
-    const envelope = signed(original);
-    await expect(
-      beta.parseWebhook({ headers: envelope.headers, rawBody: Buffer.from(tampered) }),
-    ).rejects.toThrow();
-  });
-
-  it('refuses webhooks entirely when no secret is configured', async () => {
-    const unconfigured = new DhruRestProvider({
-      providerId: 'beta',
-      baseUrl: 'https://example.invalid',
-      token: 't',
-      services: [service],
-      lexicons: BUILTIN_LEXICONS,
-    });
-    const body = JSON.stringify({ reference_id: 'r', status: 'success', replay: '' });
-    // Refused, not trusted. An absent secret must never mean "skip verification".
-    await expect(unconfigured.parseWebhook(signed(body))).rejects.toThrow();
-  });
-
   it('a correctly signed webhook for an unknown order changes nothing', async () => {
     const harness = await makePaidApp({
       providers: [

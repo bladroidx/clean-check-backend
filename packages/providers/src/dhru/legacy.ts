@@ -8,7 +8,7 @@ import type {
   Provider,
   ProviderOutcome,
 } from '../types.js';
-import { classifyRejection, postForm, toFailure, ProviderTransportError } from './transport.js';
+import { classifyBusy, classifyRejection, postForm, toFailure, ProviderTransportError } from './transport.js';
 import { fieldValues } from './assemble-fields.js';
 
 /**
@@ -26,6 +26,10 @@ import { fieldValues } from './assemble-fields.js';
  * 2. **`STATUS` is the order's state, not the answer.** `Available` means the result is ready;
  *    `Pending` means come back in hours. Reading `RESULT` without checking `STATUS` yields an
  *    empty blob that normalises to nothing and looks exactly like a clean device.
+ * 3. **imei24's instant-style responses arrive flat, not wrapped in `ERROR`/`SUCCESS`.** A refusal
+ *    looks like `{"STATUS":"error","MESSAGE":"..."}` at the top level, and one specific message --
+ *    the one-job-at-a-time refusal -- names no device at all, so it must be classified as a
+ *    transport-level `rate_limited` failure rather than a rejection or, worse, an answer.
  */
 
 export interface DhruLegacyConfig {
@@ -81,11 +85,11 @@ export class DhruLegacyProvider implements Provider {
     }
   }
 
-  async poll(orderReference: string, signal: AbortSignal): Promise<ProviderOutcome> {
-    const service = this.config.services[0];
-    if (service === undefined) {
-      return { kind: 'failed', reason: 'malformed_response', detail: 'provider has no services' };
-    }
+  async poll(
+    orderReference: string,
+    service: CatalogueService,
+    signal: AbortSignal,
+  ): Promise<ProviderOutcome> {
     try {
       const result = await postForm(
         `${this.config.baseUrl}/api/index.php`,
@@ -140,6 +144,22 @@ export class DhruLegacyProvider implements Provider {
     const error = firstOf(envelope.ERROR);
     if (error !== undefined) {
       const message = scrub(String(error['MESSAGE'] ?? error['message'] ?? 'provider error'));
+      if (classifyBusy(message)) {
+        return { kind: 'failed', reason: 'rate_limited', detail: 'supplier is busy with another job' };
+      }
+      const rejection = classifyRejection(message);
+      return rejection !== undefined
+        ? { kind: 'rejected', reason: rejection, detail: message }
+        : { kind: 'failed', reason: 'http_error', detail: message };
+    }
+
+    // Point 3 above: imei24's instant-style refusal is a FLAT body, not wrapped in ERROR/SUCCESS.
+    const flat = envelope as Record<string, unknown>;
+    if (String(flat['STATUS'] ?? '').toLowerCase() === 'error') {
+      const message = scrub(String(flat['MESSAGE'] ?? 'provider error'));
+      if (classifyBusy(message)) {
+        return { kind: 'failed', reason: 'rate_limited', detail: 'supplier is busy with another job' };
+      }
       const rejection = classifyRejection(message);
       return rejection !== undefined
         ? { kind: 'rejected', reason: rejection, detail: message }
@@ -175,7 +195,9 @@ export class DhruLegacyProvider implements Provider {
       return { kind: 'failed', reason: 'malformed_response', detail: 'provider returned an empty result' };
     }
 
-    const lexicon = this.config.lexicons.find((l) => l.serviceId === service.lexiconId);
+    const lexicon = this.config.lexicons.find(
+      (l) => l.providerId === this.id && l.lexiconId === service.lexiconId,
+    );
     if (lexicon === undefined) {
       // No lexicon means every value is unrecognised. Saying so is honest; guessing is not.
       return {

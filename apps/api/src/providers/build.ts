@@ -1,14 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  BUILTIN_LEXICONS,
-  DhruLegacyProvider,
-  DhruRestProvider,
-  Imei24Provider,
-  loadCatalogueFile,
-  type CatalogueService,
-  type Provider,
-} from '@imei-check/providers';
+import { loadCatalogueFile, type CatalogueService, type Provider } from '@imei-check/providers';
 import type { Config } from '../config.js';
 
 /**
@@ -39,60 +31,9 @@ export function buildProviders(config: Config): BuiltProviders {
   const byProvider = loadCatalogues(config.PROVIDER_CATALOGUE_DIR);
   for (const services of byProvider.values()) catalogue.push(...services);
 
-  const alpha = byProvider.get('alpha');
-  if (alpha !== undefined) {
-    if (config.ALPHA_BASE_URL && config.ALPHA_USERNAME && config.ALPHA_API_KEY) {
-      providers.push(
-        new DhruLegacyProvider({
-          providerId: 'alpha',
-          baseUrl: config.ALPHA_BASE_URL.replace(/\/+$/, ''),
-          username: config.ALPHA_USERNAME,
-          apiAccessKey: config.ALPHA_API_KEY,
-          services: alpha,
-          lexicons: BUILTIN_LEXICONS,
-        }),
-      );
-    } else {
-      skipped.push({ providerId: 'alpha', reason: 'ALPHA_BASE_URL/USERNAME/API_KEY not set' });
-    }
-  }
-
-  const beta = byProvider.get('beta');
-  if (beta !== undefined) {
-    if (config.BETA_BASE_URL && config.BETA_TOKEN) {
-      providers.push(
-        new DhruRestProvider({
-          providerId: 'beta',
-          baseUrl: config.BETA_BASE_URL.replace(/\/+$/, ''),
-          token: config.BETA_TOKEN,
-          services: beta,
-          lexicons: BUILTIN_LEXICONS,
-          ...(config.BETA_WEBHOOK_SECRET !== undefined
-            ? { webhookSecret: config.BETA_WEBHOOK_SECRET }
-            : {}),
-        }),
-      );
-    } else {
-      skipped.push({ providerId: 'beta', reason: 'BETA_BASE_URL/BETA_TOKEN not set' });
-    }
-  }
-
-  const imei24 = byProvider.get('imei24');
-  if (imei24 !== undefined) {
-    if (config.IMEI24_BASE_URL && config.IMEI24_API_KEY) {
-      providers.push(
-        new Imei24Provider({
-          providerId: 'imei24',
-          baseUrl: config.IMEI24_BASE_URL.replace(/\/+$/, ''),
-          apiKey: config.IMEI24_API_KEY,
-          services: imei24,
-          lexicons: BUILTIN_LEXICONS,
-        }),
-      );
-    } else {
-      skipped.push({ providerId: 'imei24', reason: 'IMEI24_BASE_URL/IMEI24_API_KEY not set' });
-    }
-  }
+  // Alpha, beta and the hand-guessed imei24 REST adapter are gone (Task 3). imei24
+  // (pro.imei24.com) actually speaks the DHRU legacy protocol, so it is wired up here as a
+  // `DhruLegacyProvider` in Task 6, alongside the rest of this function's rewrite.
 
   return { providers, catalogue, skipped };
 }

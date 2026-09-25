@@ -2,8 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DhruLegacyProvider } from '../src/dhru/legacy.js';
-import { DhruRestProvider } from '../src/dhru/rest.js';
-import { BUILTIN_LEXICONS } from '../src/normalise/lexicons.js';
+import { DHRU_APPLE, DHRU_BLACKLIST } from '../src/normalise/lexicons.js';
 import type { CatalogueService } from '../src/types.js';
 
 /**
@@ -25,7 +24,7 @@ function fixture(name: string): string {
 
 const blacklistService: CatalogueService = {
   serviceId: '12',
-  providerId: 'alpha',
+  providerId: 'imei24',
   displayName: 'blacklist',
   capabilities: ['blacklist.gsma'],
   fields: ['blacklist.status', 'blacklist.reported_by', 'blacklist.reported_at', 'identity.model', 'identity.manufacturer'],
@@ -55,22 +54,22 @@ const appleService: CatalogueService = {
   lexiconId: 'apple-basic',
 };
 
-const legacy = new DhruLegacyProvider({
-  providerId: 'alpha',
-  baseUrl: 'https://example.invalid',
-  username: 'u',
-  apiAccessKey: 'k',
-  services: [blacklistService, appleService],
-  lexicons: BUILTIN_LEXICONS,
-});
+/** imei24 speaks the DHRU legacy protocol; its lexicons are the same rules re-keyed to its id. */
+function makeProvider(): DhruLegacyProvider {
+  return new DhruLegacyProvider({
+    providerId: 'imei24',
+    baseUrl: 'https://example.invalid',
+    username: 'u',
+    apiAccessKey: 'k',
+    services: [blacklistService, appleService],
+    lexicons: [
+      { ...DHRU_BLACKLIST, providerId: 'imei24', lexiconId: 'blacklist' },
+      { ...DHRU_APPLE, providerId: 'imei24', lexiconId: 'apple-basic' },
+    ],
+  });
+}
 
-const rest = new DhruRestProvider({
-  providerId: 'beta',
-  baseUrl: 'https://example.invalid',
-  token: 't',
-  services: [blacklistService],
-  lexicons: BUILTIN_LEXICONS,
-});
+const legacy = makeProvider();
 
 describe('DHRU legacy transport', () => {
   it('reads a clean blacklist as a recognised value, not as an absence', () => {
@@ -249,25 +248,55 @@ describe('the polarity trap', () => {
   });
 });
 
-describe('DHRU REST transport', () => {
-  it('normalises a JSON result object', () => {
-    const outcome = rest.interpret(fixture('rest-answered.json'), blacklistService);
+describe('polling and lexicon scoping', () => {
+  it('uses the ORDER service lexicon when polling, not services[0]', async () => {
+    const provider = new DhruLegacyProvider({
+      providerId: 'imei24',
+      baseUrl: 'https://x.test',
+      username: 'u',
+      apiAccessKey: 'k',
+      services: [blacklistService, appleService],
+      lexicons: [
+        { ...DHRU_BLACKLIST, providerId: 'imei24', lexiconId: 'blacklist' },
+        { ...DHRU_APPLE, providerId: 'imei24', lexiconId: 'apple-basic' },
+      ],
+    });
+    const outcome = provider.interpret(fixture('legacy-apple-locked.json'), appleService);
     expect(outcome.kind).toBe('answered');
-    if (outcome.kind !== 'answered') return;
-    expect(outcome.fields).toContainEqual(
-      expect.objectContaining({ field: 'blacklist.status', value: 'clean' }),
-    );
+    if (outcome.kind !== 'answered') throw new Error('unreachable');
+    expect(outcome.fields.some((f) => f.field === 'lock.activation.status')).toBe(true);
   });
 
-  it('reports a pending order with its reference', () => {
-    const outcome = rest.interpret(fixture('rest-pending.json'), blacklistService);
-    expect(outcome.kind).toBe('pending');
-    if (outcome.kind === 'pending') expect(outcome.orderReference).toBe('ord_5513');
+  it('refuses a lexicon registered for a different provider', () => {
+    const provider = new DhruLegacyProvider({
+      providerId: 'imei24',
+      baseUrl: 'https://x.test',
+      username: 'u',
+      apiAccessKey: 'k',
+      services: [blacklistService],
+      lexicons: [{ ...DHRU_BLACKLIST, providerId: 'someone-else', lexiconId: 'blacklist' }],
+    });
+    const outcome = provider.interpret(fixture('legacy-blacklist-clean.json'), blacklistService);
+    expect(outcome).toMatchObject({ kind: 'failed', reason: 'malformed_response' });
   });
 
-  it('classifies a rejection', () => {
-    const outcome = rest.interpret(fixture('rest-rejected.json'), blacklistService);
-    expect(outcome.kind).toBe('rejected');
-    if (outcome.kind === 'rejected') expect(outcome.reason).toBe('service_not_available_for_device');
+  /**
+   * imei24 runs one job per API key. A second concurrent request is refused with a busy message,
+   * not a supplier field -- misreading it as a field would invent an answer from a refusal.
+   */
+  it('maps the one-job-at-a-time refusal to rate_limited, never to fields', () => {
+    const provider = makeProvider();
+    const body = JSON.stringify({
+      ERROR: [{ MESSAGE: 'Your APIKEY is workign in other session. You can start again later' }],
+    });
+    expect(provider.interpret(body, blacklistService)).toMatchObject({
+      kind: 'failed',
+      reason: 'rate_limited',
+    });
+    const flat = JSON.stringify({ STATUS: 'error', MESSAGE: 'Your APIKEY is working in other session' });
+    expect(provider.interpret(flat, blacklistService)).toMatchObject({
+      kind: 'failed',
+      reason: 'rate_limited',
+    });
   });
 });

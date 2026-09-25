@@ -41,7 +41,7 @@ const BLACKLIST_VALUES = [
 
 export const DHRU_BLACKLIST: Lexicon = {
   providerId: 'dhru',
-  serviceId: 'blacklist',
+  lexiconId: 'blacklist',
   entries: [
     { field: 'blacklist.status', labels: BLACKLIST_LABELS, values: BLACKLIST_VALUES },
     {
@@ -62,7 +62,7 @@ export const DHRU_BLACKLIST: Lexicon = {
  */
 export const DHRU_APPLE: Lexicon = {
   providerId: 'dhru',
-  serviceId: 'apple-basic',
+  lexiconId: 'apple-basic',
   entries: [
     {
       field: 'lock.activation.status',
@@ -112,6 +112,6 @@ export const DHRU_APPLE: Lexicon = {
 
 export const BUILTIN_LEXICONS: readonly Lexicon[] = [DHRU_BLACKLIST, DHRU_APPLE];
 
-export function lexiconFor(providerId: string, serviceId: string): Lexicon | undefined {
-  return BUILTIN_LEXICONS.find((l) => l.providerId === providerId && l.serviceId === serviceId);
+export function lexiconFor(providerId: string, lexiconId: string): Lexicon | undefined {
+  return BUILTIN_LEXICONS.find((l) => l.providerId === providerId && l.lexiconId === lexiconId);
 }

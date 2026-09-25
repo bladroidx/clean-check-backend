@@ -61,13 +61,18 @@ export async function pollOrders(deps: PollDeps): Promise<PollSummary> {
     }
 
     const provider = deps.providers.find((p) => p.id === order.providerId);
-    if (provider?.poll === undefined || order.orderReference === undefined) {
+    // TEMPORARY (Task 3): `poll` now takes the service that placed the order, because the
+    // lexicon it must use lives on the service, not on the provider's first-registered one.
+    // Task 8 replaces this file with the settle pipeline; until then, look the service up by id
+    // and abandon the order if it is not found rather than guessing which lexicon applies.
+    const service = provider?.catalogue().find((s) => s.serviceId === order.serviceId);
+    if (provider?.poll === undefined || service === undefined || order.orderReference === undefined) {
       await abandon(deps, order, at);
       abandoned += 1;
       continue;
     }
 
-    const outcome = await provider.poll(order.orderReference, AbortSignal.timeout(30_000));
+    const outcome = await provider.poll(order.orderReference, service, AbortSignal.timeout(30_000));
 
     if (outcome.kind === 'pending') {
       const attempts = order.attempts + 1;
