@@ -76,8 +76,11 @@ export const OFFLINE_CAPABILITIES: readonly Capability[] = ['identity.model'];
 /** Computed from other fields. Never bought, never cached (ADR-0004). */
 const DERIVED_CAPABILITIES: readonly Capability[] = ['warranty.status'];
 
-/** A standard order is polled by the worker for this long before it is abandoned. */
-const ORDER_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * A standard order is polled by the worker for this long, then abandoned as
+ * `unavailable(awaiting_provider_timed_out)` (spec section 5: 30 minutes).
+ */
+const ORDER_TTL_MS = 30 * 60 * 1000;
 const FIRST_POLL_MS = 5 * 60 * 1000;
 
 export async function runCheck(deps: RunCheckDeps, request: RunCheckRequest): Promise<CheckReport> {
@@ -331,8 +334,31 @@ async function resolvePaid(args: {
         ? await deps.repos.orders.openForImei(request.imeiHash, head.service.serviceId)
         : undefined;
 
+    const attach = head !== undefined && open !== undefined && open.orderReference !== undefined;
+
+    // The deep-check budget (or the client) is gone: do not place this order. Joining an open one
+    // above costs nothing and is still allowed; buying one nobody will wait for is not.
+    if (!attach && request.signal.aborted) {
+      for (const capability of call.capabilities) {
+        record(
+          capability,
+          assembleSection({
+            capability,
+            outcome: {
+              kind: 'failed',
+              reason: 'timeout',
+              detail: 'Not attempted: the deep-check time budget was spent.',
+            },
+            coverage: coverageFor(capability, deps.tacDirectory),
+            checkedAt: startedAt,
+          }),
+        );
+      }
+      continue;
+    }
+
     const routed: CallResult =
-      head !== undefined && open !== undefined && open.orderReference !== undefined
+      attach && head !== undefined && open?.orderReference !== undefined
         ? {
             capability: firstOf(call.capabilities),
             capabilities: call.capabilities,

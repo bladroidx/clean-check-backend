@@ -122,7 +122,10 @@ export async function makePaidApp(options: {
    * no longer affects anything.
    */
   credits?: number;
-  /** The deep route's wait window. 0 by default so a pending order hands off immediately. */
+  /**
+   * The deep route's total budget, placing included. 1 s by default: long enough for any fake to
+   * answer, short enough that a pending order hands off quickly.
+   */
   deepWaitMs?: number;
   pollIntervalMs?: number;
 } = {}): Promise<PaidHarness> {
@@ -168,7 +171,7 @@ export async function makePaidApp(options: {
     providers: options.providers ?? [new FakeProvider('fake', CLEAN)],
     metrics: new Metrics(false),
     pepper: PEPPER,
-    deepWaitMs: options.deepWaitMs ?? 0,
+    deepWaitMs: options.deepWaitMs ?? 1_000,
     pollIntervalMs: options.pollIntervalMs ?? 250,
   });
 

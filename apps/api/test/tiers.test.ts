@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { CheckReport } from '@imei-check/contract';
-import { CLEAN, FakeProvider, idempotencyKey, makePaidApp, service } from './paid-helpers.js';
+import { Imei } from '@imei-check/identity';
+import { MemoryRepositories, coverageFor, pollDueOrders } from '@imei-check/core';
+import type { CatalogueService, ExecuteRequest, ProviderOutcome } from '@imei-check/providers';
+import { CLEAN, FakeProvider, PEPPER, idempotencyKey, makePaidApp, service } from './paid-helpers.js';
 import { SENTINEL, UNKNOWN_TAC_IMEI } from './helpers.js';
 
 const post = (h: Awaited<ReturnType<typeof makePaidApp>>, url: string, body: unknown, key = idempotencyKey()) =>
@@ -91,14 +94,203 @@ describe('wait window and hand-off', () => {
     const report = (await post(h, '/v1/deep_checks', { imei: SENTINEL })).json<CheckReport>();
     expect(report.sections['blacklist.gsma']).toMatchObject({ outcome: 'inconclusive', reason: 'awaiting_provider' });
     expect(report.status).toBe('partial');
+
+    // R12: the in-window polls left the worker's schedule exactly as placed.
+    const [row] = await h.repos.orders.openForCheck(report.check_id);
+    expect(row?.attempts).toBe(0);
+    expect(row?.nextPollAt?.getTime()).toBe(Date.parse(report.requested_at) + 5 * 60 * 1000);
+
+    // The worker's next pass, once the order is due, gets the answer...
+    provider.pollOutcomes = [CLEAN];
+    const summary = await pollDueOrders({
+      repos: h.repos,
+      providers: h.services.providers,
+      tacDirectory: h.app.tacDirectory,
+      metrics: h.services.metrics,
+      now: () => new Date(Date.now() + 6 * 60 * 1000),
+    });
+    expect(summary.answered).toBe(1);
+
+    // ...and GET reflects it without calling the supplier.
+    const executedBefore = provider.executed.length;
+    const fetched = await h.app.inject({ method: 'GET', url: `/v1/deep_checks/${report.check_id}`, headers: h.auth() });
+    expect(fetched.statusCode).toBe(200);
+    const later = fetched.json<CheckReport>();
+    expect(later.sections['blacklist.gsma']?.outcome).toBe('pass');
+    expect(later.status).toBe('complete');
+    expect(later.summary.reasons.length).toBeGreaterThan(0);
+    expect(provider.executed).toHaveLength(executedBefore);
   });
 
   it('a second deep check for the same IMEI attaches to the open order instead of placing another', async () => {
     const provider = new FakeProvider('fake', { kind: 'pending', orderReference: 'o3' }, [service({ providerId: 'fake', async: true })]);
     provider.pollOutcomes = [{ kind: 'pending', orderReference: 'o3' }];
-    const h = await makePaidApp({ providers: [provider], deepWaitMs: 0 });
-    await post(h, '/v1/deep_checks', { imei: SENTINEL });
-    await post(h, '/v1/deep_checks', { imei: SENTINEL });
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: 50, pollIntervalMs: 10 });
+    const first = (await post(h, '/v1/deep_checks', { imei: SENTINEL })).json<CheckReport>();
+    const calls = (h.repos as MemoryRepositories).providerCalls.rows;
+    expect(calls.size).toBe(1);
+    const second = (await post(h, '/v1/deep_checks', { imei: SENTINEL })).json<CheckReport>();
     expect(provider.executed).toHaveLength(1);
+    // Attaching spends nothing, so it records no spend either.
+    expect(calls.size).toBe(1);
+    expect(second.sections['blacklist.gsma']).toMatchObject({ outcome: 'inconclusive', reason: 'awaiting_provider' });
+    const attached = await h.repos.orders.openForCheck(second.check_id);
+    expect(attached).toHaveLength(1);
+    expect(attached[0]?.orderReference).toBe('o3');
+    expect(attached[0]?.checkId).not.toBe(first.check_id);
+  });
+});
+
+const imeiHash = (() => {
+  const parsed = Imei.parse(SENTINEL);
+  if (parsed.kind !== 'valid') throw new Error('sentinel must be valid');
+  return parsed.imei.hmac(PEPPER);
+})();
+
+const BOTH = service({
+  providerId: 'fake',
+  serviceId: 'all-in-one',
+  capabilities: ['blacklist.gsma', 'lock.activation'],
+  fields: ['blacklist.status', 'lock.activation.status'],
+});
+
+describe('one call, several capabilities', () => {
+  it('a pending multi-capability call inserts one order row per capability, sharing orderReference and imeiHash', async () => {
+    const provider = new FakeProvider('fake', { kind: 'pending', orderReference: 'm1' }, [{ ...BOTH, async: true }]);
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: 50, pollIntervalMs: 10 });
+    const report = (await post(h, '/v1/deep_checks', { imei: SENTINEL, capabilities: ['blacklist.gsma', 'lock.activation'] })).json<CheckReport>();
+
+    expect(provider.executed).toHaveLength(1);
+    const rows = await h.repos.orders.openForCheck(report.check_id);
+    expect(rows.map((r) => r.capability).sort()).toEqual(['blacklist.gsma', 'lock.activation']);
+    expect(new Set(rows.map((r) => r.orderReference))).toEqual(new Set(['m1']));
+    expect(new Set(rows.map((r) => r.imeiHash))).toEqual(new Set([imeiHash]));
+    // `reference_id` is UNIQUE in Postgres.
+    expect(new Set(rows.map((r) => r.referenceId)).size).toBe(2);
+    // Spec section 5: the worker abandons after 30 minutes.
+    for (const row of rows) expect(row.expiresAt.getTime()).toBe(Date.parse(report.requested_at) + 30 * 60 * 1000);
+  });
+
+  it('an answered multi-capability call buys once and writes the cache once per owning capability', async () => {
+    const provider = new FakeProvider('fake', {
+      kind: 'answered',
+      fields: [
+        { field: 'blacklist.status', value: 'clean' },
+        { field: 'lock.activation.status', value: 'off' },
+      ],
+      misses: [],
+    }, [BOTH]);
+    const h = await makePaidApp({ providers: [provider] });
+    const writes: string[][] = [];
+    const write = h.services.cache.write.bind(h.services.cache);
+    h.services.cache.write = async (args) => {
+      writes.push(args.fields.map((f) => f.field));
+      return write(args);
+    };
+
+    await post(h, '/v1/deep_checks', { imei: SENTINEL, capabilities: ['blacklist.gsma', 'lock.activation'] });
+
+    expect(provider.executed).toHaveLength(1);
+    expect(writes.sort()).toEqual([['blacklist.status'], ['lock.activation.status']]);
+    expect((await h.repos.cache.get(`${imeiHash}:blacklist.status`))?.coverage).toEqual(coverageFor('blacklist.gsma', h.app.tacDirectory));
+    expect((await h.repos.cache.get(`${imeiHash}:lock.activation.status`))?.coverage).toEqual(coverageFor('lock.activation', h.app.tacDirectory));
+  });
+});
+
+/** Waits `ms`, or returns early (true) when `signal` aborts -- as a real HTTP transport does. */
+function waitOrAbort(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) return resolve(true);
+    const timer = setTimeout(() => resolve(false), ms);
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(true); }, { once: true });
+  });
+}
+
+/** A supplier slower than the budget, that honours the abort signal like a real transport. */
+class SlowProvider extends FakeProvider {
+  constructor(
+    id: string,
+    outcome: ProviderOutcome,
+    services: CatalogueService[],
+    private readonly executeMs: number,
+    private readonly pollMs = 0,
+  ) {
+    super(id, outcome, services);
+  }
+  override async execute(request: ExecuteRequest): Promise<ProviderOutcome> {
+    this.executed.push(request);
+    if (await waitOrAbort(this.executeMs, request.signal)) return { kind: 'failed', reason: 'timeout' };
+    return this.outcome;
+  }
+  override async poll(_ref?: string, _service?: CatalogueService, signal?: AbortSignal): Promise<ProviderOutcome> {
+    if (await waitOrAbort(this.pollMs, signal)) return { kind: 'failed', reason: 'timeout' };
+    return this.pollOutcomes[0] ?? this.outcome;
+  }
+}
+
+const timed = async <T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }> => {
+  const started = Date.now();
+  const value = await fn();
+  return { value, ms: Date.now() - started };
+};
+
+describe('the deep-check time budget (R10/R11)', () => {
+  const BUDGET = 300;
+  const MARGIN = 400;
+
+  it('a supplier slower than the budget cannot hold the POST past it', async () => {
+    const provider = new SlowProvider('fake', CLEAN, [service({ providerId: 'fake' })], 5_000);
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: BUDGET });
+    const { value, ms } = await timed(() => post(h, '/v1/deep_checks', { imei: SENTINEL }));
+    expect(ms).toBeLessThan(BUDGET + MARGIN);
+    expect(value.statusCode).toBe(200);
+    expect(value.json<CheckReport>().sections['blacklist.gsma']?.outcome).toBe('unavailable');
+  });
+
+  it('a poll slower than the budget cannot hold the POST past it', async () => {
+    const provider = new SlowProvider('fake', { kind: 'pending', orderReference: 'p1' }, [service({ providerId: 'fake', async: true })], 0, 5_000);
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: BUDGET, pollIntervalMs: 10 });
+    const { value, ms } = await timed(() => post(h, '/v1/deep_checks', { imei: SENTINEL }));
+    expect(ms).toBeLessThan(BUDGET + MARGIN);
+    expect(value.json<CheckReport>().sections['blacklist.gsma']).toMatchObject({ outcome: 'inconclusive', reason: 'awaiting_provider' });
+  });
+
+  it('a supplier lock held by another process cannot hold the POST past it', async () => {
+    const h = await makePaidApp({ deepWaitMs: BUDGET });
+    let release: () => void = () => {};
+    const holder = h.repos.locks.withLock('provider:fake', 5_000, () => new Promise<void>((r) => { release = r; }));
+    const { value, ms } = await timed(() => post(h, '/v1/deep_checks', { imei: SENTINEL }));
+    release();
+    await holder;
+    expect(ms).toBeLessThan(BUDGET + MARGIN);
+    expect(value.json<CheckReport>().sections['blacklist.gsma']?.outcome).toBe('unavailable');
+  });
+
+  it('once the budget is spent the next call is not placed at all', async () => {
+    const provider = new SlowProvider('fake', CLEAN, [
+      service({ providerId: 'fake', serviceId: 'bl', costUsd: 0.1 }),
+      service({ providerId: 'fake', serviceId: 'al', capabilities: ['lock.activation'], fields: ['lock.activation.status'], costUsd: 0.5 }),
+    ], 5_000);
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: BUDGET });
+    const { value, ms } = await timed(() => post(h, '/v1/deep_checks', { imei: SENTINEL, capabilities: ['blacklist.gsma', 'lock.activation'] }));
+    expect(ms).toBeLessThan(BUDGET + MARGIN);
+    expect(provider.executed).toHaveLength(1);
+    expect(value.json<CheckReport>().sections['lock.activation']).toMatchObject({
+      outcome: 'unavailable',
+      reason: 'provider_timeout',
+      detail: 'Not attempted: the deep-check time budget was spent.',
+    });
+    // Nothing placed means nothing recorded as spend.
+    expect((h.repos as MemoryRepositories).providerCalls.rows.size).toBe(1);
+  });
+
+  it('the window counts from request start, not from when the order was placed', async () => {
+    // Placing takes 500 ms; the budget is 700 ms. Counting from placement would return at ~1200.
+    const provider = new SlowProvider('fake', { kind: 'pending', orderReference: 'p2' }, [service({ providerId: 'fake', async: true })], 500);
+    provider.pollOutcomes = [{ kind: 'pending', orderReference: 'p2' }];
+    const h = await makePaidApp({ providers: [provider], deepWaitMs: 700, pollIntervalMs: 10 });
+    const { value, ms } = await timed(() => post(h, '/v1/deep_checks', { imei: SENTINEL }));
+    expect(ms).toBeLessThan(1_000);
+    expect(value.json<CheckReport>().status).toBe('partial');
   });
 });

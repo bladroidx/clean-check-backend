@@ -81,6 +81,12 @@ describe('loadConfig', () => {
     );
   });
 
+  it('rejects a wait window below 1 s (it is also the budget for placing orders)', () => {
+    expect(() => loadConfig({ ...base, DEEP_CHECK_WAIT_MS: '0' } as NodeJS.ProcessEnv)).toThrow(
+      /DEEP_CHECK_WAIT_MS/,
+    );
+  });
+
   it('defaults', () => {
     const c = loadConfig(base);
     expect(c.IMEI24_BASE_URL).toBe('https://pro.imei24.com');

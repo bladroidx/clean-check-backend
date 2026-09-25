@@ -63,48 +63,63 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
         }
 
         const startedAt = Date.now();
-        return handleCheckPost({
-          request,
-          reply,
-          services,
-          tier: 'deep',
-          imeiText: request.body.imei,
-          idempotencyKey: request.headers['idempotency-key'],
-          capabilities: requested,
-          run: async (ctx) => {
-            const first = await runCheck(
-              {
-                repos: services.repos,
-                router: services.router,
-                cache: services.cache,
-                tacDirectory: app.tacDirectory,
-                metrics: services.metrics,
-              },
-              {
-                tier: 'deep',
-                tenantId: ctx.tenant.id,
-                tenantSalt: ctx.tenant.imeiSalt,
-                imei: ctx.imei,
-                imeiHash: ctx.imei.hmac(services.pepper),
-                capabilities: requested,
-                maxAgeSeconds: request.body.max_age_seconds,
-                idempotencyKey: ctx.idempotencyKey,
-                signal: toSignal(request.raw),
-              },
-            );
-            if (first.status !== 'partial') return first;
+        // ONE budget for the whole request, placing included: the window is a total from request
+        // start, and every supplier call, lock wait and poll below is bounded by it. A client that
+        // hangs up ends it too.
+        //
+        // A plain controller and a timer we own, not `AbortSignal.any([.., AbortSignal.timeout()])`:
+        // Node holds the sources of a composite signal weakly, and an unreferenced timeout signal
+        // can be garbage-collected before it fires -- leaving a budget that never ends (seen as a
+        // 5 s hang under GC pressure in the test suite).
+        const controller = new AbortController();
+        const budget = controller.signal;
+        const timer = setTimeout(
+          () => controller.abort(),
+          Math.max(0, startedAt + services.deepWaitMs - Date.now()),
+        );
+        const hangup = toSignal(request.raw);
+        if (hangup.aborted) controller.abort();
+        else hangup.addEventListener('abort', () => controller.abort(), { once: true });
+        try {
+          return await handleCheckPost({
+            request,
+            reply,
+            services,
+            tier: 'deep',
+            imeiText: request.body.imei,
+            idempotencyKey: request.headers['idempotency-key'],
+            capabilities: requested,
+            run: async (ctx) => {
+              const first = await runCheck(
+                {
+                  repos: services.repos,
+                  router: services.router,
+                  cache: services.cache,
+                  tacDirectory: app.tacDirectory,
+                  metrics: services.metrics,
+                },
+                {
+                  tier: 'deep',
+                  tenantId: ctx.tenant.id,
+                  tenantSalt: ctx.tenant.imeiSalt,
+                  imei: ctx.imei,
+                  imeiHash: ctx.imei.hmac(services.pepper),
+                  capabilities: requested,
+                  maxAgeSeconds: request.body.max_age_seconds,
+                  idempotencyKey: ctx.idempotencyKey,
+                  signal: budget,
+                },
+              );
+              if (first.status !== 'partial') return first;
 
-            await waitForOrders(
-              services,
-              app.tacDirectory,
-              first.check_id,
-              startedAt + services.deepWaitMs,
-              services.pollIntervalMs,
-            );
-            const record = await services.repos.checks.byId(ctx.tenant.id, first.check_id, 'deep');
-            return record === undefined ? first : reportFromRecord(services, record);
-          },
-        });
+              await waitForOrders(services, app.tacDirectory, first.check_id, budget, services.pollIntervalMs);
+              const record = await services.repos.checks.byId(ctx.tenant.id, first.check_id, 'deep');
+              return record === undefined ? first : reportFromRecord(services, record);
+            },
+          });
+        } finally {
+          clearTimeout(timer);
+        }
       },
     );
 
@@ -125,29 +140,43 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
 }
 
 /**
- * Polls this check's open orders until they settle or `deadline` (epoch ms) passes.
+ * Polls this check's open orders until they settle or `budget` aborts.
  *
  * Settlement is the same `pollOrders` the worker runs, so the section, cache write and verdict
  * recompute cannot drift between the two clocks. Polls go through the guarded providers and so
- * take the supplier's one-job lock like every other call.
+ * take the supplier's one-job lock like every other call -- bounded by the same budget. They do
+ * NOT advance the order's backoff: ten polls a second apart would otherwise push the worker's
+ * schedule out by an hour.
  */
 async function waitForOrders(
   services: AppServices,
   tacDirectory: TacDirectory,
   checkId: string,
-  deadline: number,
+  budget: AbortSignal,
   intervalMs: number,
 ): Promise<void> {
-  while (Date.now() < deadline) {
+  while (!budget.aborted) {
     const open = await services.repos.orders.openForCheck(checkId);
     if (open.length === 0) return;
     const summary = await pollOrders(
       { repos: services.repos, providers: services.providers, tacDirectory, metrics: services.metrics },
       open,
+      { signal: budget, advanceBackoff: false },
     );
-    if (summary.stillPending === 0) return;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+    if (summary.stillPending === 0 || budget.aborted) return;
+    await sleep(intervalMs, budget);
   }
+}
+
+/** Resolves after `ms`, or at once when `signal` aborts. Never rejects. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }

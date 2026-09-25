@@ -78,8 +78,10 @@ export const ConfigSchema = z.object({
    * How long POST /v1/deep_checks waits for slow orders before handing off to polling. Must stay
    * below every caller's timeout: the Android app reads for 15 s and check-this-phone-backend
    * gives up after 20 s. A window longer than that means the phone times out while we still pay.
+   * It is also the TOTAL budget for placing orders, so it has a floor: at 0 nothing would ever be
+   * bought and every deep section would read "not attempted".
    */
-  DEEP_CHECK_WAIT_MS: z.coerce.number().int().min(0).max(12_000).default(10_000),
+  DEEP_CHECK_WAIT_MS: z.coerce.number().int().min(1_000).max(12_000).default(10_000),
   /** `version:base64key[,version:base64key]` -- ADR-0007. Enforced when DATABASE_URL is set. */
   IMEI_ENCRYPTION_KEYS: z.string().optional(),
 
