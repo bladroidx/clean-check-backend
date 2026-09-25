@@ -55,6 +55,8 @@ const services =
         metrics,
         pepper: Buffer.from(config.SERVER_PEPPER, 'utf8'),
         feedbackUrlFor: (providerId) => feedbackUrlFor(config, providerId),
+        deepWaitMs: config.DEEP_CHECK_WAIT_MS,
+        dailySpendUsd: config.IMEI24_DAILY_SPEND_USD,
       })
     : undefined;
 

@@ -27,13 +27,13 @@ async function post(
 ) {
   return harness.app.inject({
     method: 'POST',
-    url: '/v1/checks',
+    url: '/v1/deep_checks',
     headers: { ...harness.auth(), 'idempotency-key': key },
     payload: body as Record<string, unknown>,
   });
 }
 
-describe('POST /v1/checks', () => {
+describe('POST /v1/deep_checks', () => {
   it('answers a clean device and charges nothing', async () => {
     const harness = await makePaidApp();
     const response = await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] });
@@ -152,15 +152,17 @@ describe('idempotency', () => {
     expect(other.json().error.code).toBe('idempotency_key_reused');
   });
 
-  it('requires the header at all', async () => {
+  it('requires the header at all, on both tiers', async () => {
     const harness = await makePaidApp();
-    const response = await harness.app.inject({
-      method: 'POST',
-      url: '/v1/checks',
-      headers: harness.auth(),
-      payload: { imei: SENTINEL },
-    });
-    expect(response.statusCode).toBe(400);
+    for (const url of ['/v1/checks', '/v1/deep_checks']) {
+      const response = await harness.app.inject({
+        method: 'POST',
+        url,
+        headers: harness.auth(),
+        payload: { imei: SENTINEL },
+      });
+      expect(response.statusCode).toBe(400);
+    }
   });
 });
 
@@ -197,15 +199,17 @@ describe('credits', () => {
 });
 
 describe('auth', () => {
-  it('refuses an absent key', async () => {
+  it('refuses an absent key, on both tiers', async () => {
     const harness = await makePaidApp();
-    const response = await harness.app.inject({
-      method: 'POST',
-      url: '/v1/checks',
-      headers: { 'idempotency-key': idempotencyKey() },
-      payload: { imei: SENTINEL },
-    });
-    expect(response.statusCode).toBe(401);
+    for (const url of ['/v1/checks', '/v1/deep_checks']) {
+      const response = await harness.app.inject({
+        method: 'POST',
+        url,
+        headers: { 'idempotency-key': idempotencyKey() },
+        payload: { imei: SENTINEL },
+      });
+      expect(response.statusCode).toBe(401);
+    }
   });
 
   it('gives the same answer for a malformed key and an unknown one', async () => {
@@ -257,14 +261,14 @@ describe('the Luhn gate', () => {
   });
 });
 
-describe('GET /v1/checks/:id', () => {
+describe('GET /v1/deep_checks/:id', () => {
   it('returns a stored check, and 404 for another tenant’s id', async () => {
     const harness = await makePaidApp();
     const created = (await post(harness, { imei: SENTINEL, capabilities: ['blacklist.gsma'] })).json<CheckReport>();
 
     const found = await harness.app.inject({
       method: 'GET',
-      url: `/v1/checks/${created.check_id}`,
+      url: `/v1/deep_checks/${created.check_id}`,
       headers: harness.auth(),
     });
     expect(found.statusCode).toBe(200);
@@ -272,7 +276,7 @@ describe('GET /v1/checks/:id', () => {
 
     const missing = await harness.app.inject({
       method: 'GET',
-      url: '/v1/checks/chk_does_not_exist',
+      url: '/v1/deep_checks/chk_does_not_exist',
       headers: harness.auth(),
     });
     expect(missing.statusCode).toBe(404);

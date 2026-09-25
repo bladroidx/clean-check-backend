@@ -213,8 +213,7 @@ function build(input: AssembleInput): SectionResult {
         reason: 'awaiting_provider',
         remedy: 'retry_later',
         detail:
-          'The supplier accepted the order and will answer asynchronously. Poll this check or ' +
-          'register a webhook.',
+          'The supplier accepted the order and will answer shortly. Poll GET /v1/deep_checks/{check_id}.',
       });
 
     case 'answered':

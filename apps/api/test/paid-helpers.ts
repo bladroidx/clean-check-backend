@@ -1,12 +1,13 @@
 import { InMemoryTacDirectory } from '@imei-check/identity';
 import { MemoryRepositories, Metrics, type Repositories } from '@imei-check/core';
-import type {
-  CatalogueService,
-  ExecuteRequest,
-  ParsedWebhook,
-  Provider,
-  ProviderOutcome,
-  WebhookInput,
+import {
+  coversTac,
+  type CatalogueService,
+  type ExecuteRequest,
+  type ParsedWebhook,
+  type Provider,
+  type ProviderOutcome,
+  type WebhookInput,
 } from '@imei-check/providers';
 import { buildApp, type App } from '../src/app.js';
 import { createLogger } from '../src/lib/log.js';
@@ -46,6 +47,11 @@ export function service(overrides: Partial<CatalogueService> = {}): CatalogueSer
 export class FakeProvider implements Provider {
   readonly executed: ExecuteRequest[] = [];
   outcome: ProviderOutcome;
+  /**
+   * What `poll` answers, in order; the last entry repeats forever. Empty means `poll` answers
+   * `outcome`, as `execute` does.
+   */
+  pollOutcomes: ProviderOutcome[] = [];
 
   constructor(
     readonly id: string,
@@ -59,12 +65,17 @@ export class FakeProvider implements Provider {
   catalogue(): readonly CatalogueService[] {
     return this.services;
   }
-  supports(capability: string): CatalogueService | undefined {
-    return this.services.find((s) => (s.capabilities as readonly string[]).includes(capability));
+  supports(capability: string, tac: string): CatalogueService | undefined {
+    return this.services.find(
+      (s) => (s.capabilities as readonly string[]).includes(capability) && coversTac(s, tac),
+    );
   }
   async execute(request: ExecuteRequest): Promise<ProviderOutcome> {
     this.executed.push(request);
     return this.outcome;
+  }
+  async poll(): Promise<ProviderOutcome> {
+    return this.pollOutcomes.length > 1 ? this.pollOutcomes.shift()! : (this.pollOutcomes[0] ?? this.outcome);
   }
   /**
    * Declared as a real method rather than an optional field set to undefined: under
@@ -111,6 +122,9 @@ export async function makePaidApp(options: {
    * no longer affects anything.
    */
   credits?: number;
+  /** The deep route's wait window. 0 by default so a pending order hands off immediately. */
+  deepWaitMs?: number;
+  pollIntervalMs?: number;
 } = {}): Promise<PaidHarness> {
   const lines: string[] = [];
   // The REAL logger, tripwire included -- a plain pino here would let an IMEI leak through a test.
@@ -154,6 +168,8 @@ export async function makePaidApp(options: {
     providers: options.providers ?? [new FakeProvider('fake', CLEAN)],
     metrics: new Metrics(false),
     pepper: PEPPER,
+    deepWaitMs: options.deepWaitMs ?? 0,
+    pollIntervalMs: options.pollIntervalMs ?? 250,
   });
 
   const app = await buildApp({ logger, tacDirectory, services });

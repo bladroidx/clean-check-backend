@@ -196,6 +196,10 @@ export const CapabilitiesResponse = z.object({
       capability: Capability,
       available: z.boolean(),
       credits: z.number().int().nonnegative(),
+      /** Which route answers it: `free` is `POST /v1/checks`, `deep` is `POST /v1/deep_checks`. */
+      tier: z.enum(['free', 'deep']),
+      /** What one call to the first-choice supplier costs us, in USD. `0` for a free capability. */
+      cost_usd: z.number().nonnegative(),
       /** Present when `available` is false. Says why, in the same vocabulary as a section. */
       reason: Reason.optional(),
       cached: z.boolean(),

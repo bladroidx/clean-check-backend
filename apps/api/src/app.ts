@@ -13,6 +13,7 @@ import { healthRoutes, type DatabaseProbe } from './routes/health.js';
 import { imeiRoutes } from './routes/imei.js';
 import { tacRoutes } from './routes/tac.js';
 import { checkRoutes } from './routes/checks.js';
+import { deepCheckRoutes } from './routes/deep-checks.js';
 import { providerFeedbackRoutes } from './routes/provider-feedback.js';
 import { authPlugin } from './auth/plugin.js';
 import { registerRawBody } from './lib/raw-body.js';
@@ -63,8 +64,11 @@ export async function buildApp(deps: AppDeps) {
         version: '1.0.0',
       },
       tags: [
-        { name: 'free', description: 'No credits, no upstream providers.' },
-        { name: 'paid', description: 'Costs credits. Requires an API key.' },
+        {
+          name: 'free',
+          description: 'No supplier calls. Requires an API key when a database is configured.',
+        },
+        { name: 'paid', description: 'Calls imei24. Costs supplier money; charges callers nothing.' },
         { name: 'meta', description: 'Health, schema and attributions.' },
       ],
     },
@@ -115,6 +119,7 @@ export async function buildApp(deps: AppDeps) {
       await instance.register(tacRoutes);
     });
     await app.register(checkRoutes(services));
+    await app.register(deepCheckRoutes(services));
     await app.register(providerFeedbackRoutes(services));
     app.get(
       '/metrics',

@@ -110,10 +110,30 @@ describe('sentinel IMEI', () => {
 
       const response = await harness.app.inject({
         method: 'POST',
+        url: '/v1/deep_checks',
+        headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
+        payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
+      });
+      // identity.model now lives on the free route only; the free check writes a check record and
+      // a stored section too, so it goes through the same sweep.
+      const free = await harness.app.inject({
+        method: 'POST',
         url: '/v1/checks',
         headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
-        payload: { imei: SENTINEL, capabilities: ['blacklist.gsma', 'identity.model'] },
+        payload: { imei: SENTINEL, capabilities: ['identity.model', 'blacklist.gsma'] },
       });
+      expect(free.statusCode).toBe(200);
+      expect(free.body).not.toContain(SENTINEL);
+      const freeId = free.json().check_id as string;
+      expect(JSON.stringify(await harness.repos.checks.sections(freeId))).not.toContain(SENTINEL);
+      expect(JSON.stringify(await harness.repos.checks.byId('ten_test', freeId))).not.toContain(SENTINEL);
+      const freeFetched = await harness.app.inject({
+        method: 'GET',
+        url: `/v1/checks/${freeId}`,
+        headers: harness.auth(),
+      });
+      expect(freeFetched.statusCode).toBe(200);
+      expect(freeFetched.body).not.toContain(SENTINEL);
 
       expect(response.body).not.toContain(SENTINEL);
       expect(harness.logs.raw()).not.toContain(SENTINEL);
@@ -140,9 +160,10 @@ describe('sentinel IMEI', () => {
 
       const fetched = await harness.app.inject({
         method: 'GET',
-        url: `/v1/checks/${checkId}`,
+        url: `/v1/deep_checks/${checkId}`,
         headers: harness.auth(),
       });
+      expect(fetched.statusCode).toBe(200);
       expect(fetched.body).not.toContain(SENTINEL);
 
       await harness.app.close();
@@ -164,7 +185,7 @@ describe('sentinel IMEI', () => {
 
     const response = await harness.app.inject({
       method: 'POST',
-      url: '/v1/checks',
+      url: '/v1/deep_checks',
       headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
       payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
     });

@@ -162,7 +162,7 @@ describe('per-tenant concurrency', () => {
     const key = idempotencyKey();
     const refused = await harness.app.inject({
       method: 'POST',
-      url: '/v1/checks',
+      url: '/v1/deep_checks',
       headers: { ...harness.auth(), 'idempotency-key': key },
       payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
     });
@@ -176,7 +176,7 @@ describe('per-tenant concurrency', () => {
     }
     const retried = await harness.app.inject({
       method: 'POST',
-      url: '/v1/checks',
+      url: '/v1/deep_checks',
       headers: { ...harness.auth(), 'idempotency-key': key },
       payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
     });
@@ -197,7 +197,7 @@ describe('per-tenant concurrency', () => {
 
     const response = await harness.app.inject({
       method: 'POST',
-      url: '/v1/checks',
+      url: '/v1/deep_checks',
       headers: { ...harness.auth(), 'idempotency-key': idempotencyKey() },
       payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
     });
@@ -241,7 +241,7 @@ describe('tenant isolation', () => {
     const reportA = (
       await a.app.inject({
         method: 'POST',
-        url: '/v1/checks',
+        url: '/v1/deep_checks',
         headers: { ...a.auth(), 'idempotency-key': idempotencyKey() },
         payload: { imei: SENTINEL, capabilities: ['blacklist.gsma'] },
       })

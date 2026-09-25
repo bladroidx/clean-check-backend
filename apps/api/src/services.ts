@@ -1,6 +1,6 @@
 import type { Capability } from '@imei-check/contract';
 import { BreakerRegistry, Router, type Provider } from '@imei-check/providers';
-import { FieldCache } from '@imei-check/core';
+import { FieldCache, GuardedProvider } from '@imei-check/core';
 import {
   ConcurrencyGate,
   LIMITS,
@@ -31,23 +31,38 @@ export interface AppServices {
   readonly breakers: BreakerRegistry;
   /** `SERVER_PEPPER`. The internal hash key, never returned and never per-tenant. */
   readonly pepper: Buffer;
+  /** What `POST /v1/checks` answers when the caller names nothing. Offline only. */
   readonly defaultCapabilities: readonly Capability[];
+  /** What `POST /v1/deep_checks` buys when the caller names nothing. */
+  readonly deepDefaultCapabilities: readonly Capability[];
+  /**
+   * The deep route's TOTAL budget, from request start, before handing off to
+   * `GET /v1/deep_checks/:id`. Must stay below every caller's timeout (config caps it at 12 s).
+   */
+  readonly deepWaitMs: number;
+  /** Pause between polls inside the wait window. */
+  readonly pollIntervalMs: number;
+  /**
+   * Every provider wrapped in `GuardedProvider` -- the same instances the router uses, so the wait
+   * window's polls take the same one-job-at-a-time lock as the order that placed them.
+   */
   readonly providers: readonly Provider[];
 }
 
 /**
- * What a check runs when the caller does not name capabilities.
- *
- * Deliberately NOT every capability in the vocabulary: `lock.mdm` and `network.sold_by` are
- * niche, and silently spending a caller's credits on things they did not ask for is the kind of
- * default that ends up in a chargeback.
+ * What the free check answers when the caller does not name capabilities: everything it CAN
+ * answer, which is the offline TAC lookup and nothing else.
  */
-export const DEFAULT_CAPABILITIES: readonly Capability[] = [
-  'identity.model',
-  'blacklist.gsma',
-  'lock.carrier',
-  'lock.activation',
-];
+export const FREE_DEFAULT_CAPABILITIES: readonly Capability[] = ['identity.model'];
+
+/**
+ * What a deep check buys when the caller does not name capabilities.
+ *
+ * Deliberately the one question a buyer always has and nothing more: every capability is a
+ * separate supplier charge, and silently spending money on locks and warranty nobody asked about is
+ * the kind of default that only ever gets noticed on the invoice.
+ */
+export const DEEP_DEFAULT_CAPABILITIES: readonly Capability[] = ['blacklist.gsma'];
 
 export interface BuildServicesOptions {
   readonly repos: Repositories;
@@ -57,14 +72,41 @@ export interface BuildServicesOptions {
   readonly feedbackUrlFor?: (providerId: string) => string | undefined;
   readonly defaultCapabilities?: readonly Capability[];
   readonly now?: () => Date;
+  /** `DEEP_CHECK_WAIT_MS`. Default 10 000. */
+  readonly deepWaitMs?: number;
+  /** Default 1 000. */
+  readonly pollIntervalMs?: number;
+  /** `IMEI24_DAILY_SPEND_USD`, applied per provider. Default 10. */
+  readonly dailySpendUsd?: number;
+  /**
+   * How long a call may wait for the supplier's one-job lock. Default half the wait window (at
+   * least 1 s), so a busy lock cannot by itself eat the whole budget of a deep check.
+   */
+  readonly lockWaitMs?: number;
 }
 
 export function buildServices(options: BuildServicesOptions): AppServices {
   const breakers = new BreakerRegistry();
   const metrics = options.metrics;
+  const deepWaitMs = options.deepWaitMs ?? 10_000;
+  const lockWaitMs = options.lockWaitMs ?? Math.max(1_000, Math.floor(deepWaitMs / 2));
+  const dailySpendUsd = options.dailySpendUsd ?? 10;
+
+  // One wrapper per provider, shared by the router (placing orders) and the wait window (polling
+  // them), so both honour the same lock and the same daily cap.
+  const providers = options.providers.map(
+    (p) =>
+      new GuardedProvider(p, {
+        lock: options.repos.locks,
+        lockWaitMs,
+        dailySpendUsd,
+        costSince: (id, since) => options.repos.providerCalls.costSinceForProvider(id, since),
+        ...(options.now !== undefined ? { now: options.now } : {}),
+      }),
+  );
 
   const router = new Router({
-    providers: options.providers,
+    providers,
     breakers,
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.feedbackUrlFor !== undefined ? { feedbackUrlFor: options.feedbackUrlFor } : {}),
@@ -115,8 +157,11 @@ export function buildServices(options: BuildServicesOptions): AppServices {
     maxConcurrentChecks: MAX_CONCURRENT_PAID_CHECKS,
     breakers,
     pepper: options.pepper,
-    defaultCapabilities: options.defaultCapabilities ?? DEFAULT_CAPABILITIES,
-    providers: options.providers,
+    defaultCapabilities: options.defaultCapabilities ?? FREE_DEFAULT_CAPABILITIES,
+    deepDefaultCapabilities: DEEP_DEFAULT_CAPABILITIES,
+    deepWaitMs,
+    pollIntervalMs: options.pollIntervalMs ?? 1_000,
+    providers,
   };
 
   return services;

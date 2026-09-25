@@ -11,7 +11,7 @@ import {
   makePaidApp,
   service,
 } from './paid-helpers.js';
-import { SENTINEL } from './helpers.js';
+import { SENTINEL, UNKNOWN_TAC_IMEI } from './helpers.js';
 
 /**
  * Orchestration paths that are not the happy one.
@@ -20,14 +20,29 @@ import { SENTINEL } from './helpers.js';
  * and each of them can turn an honest answer into a misleading one if it takes the wrong branch.
  */
 
+/** The paid route: everything here that buys from a supplier. */
 function post(
   harness: Awaited<ReturnType<typeof makePaidApp>>,
   body: unknown,
   key = idempotencyKey(),
 ) {
+  return postTo(harness, '/v1/deep_checks', body, key);
+}
+
+/** The free route: the offline tier. */
+function postFree(harness: Awaited<ReturnType<typeof makePaidApp>>, body: unknown) {
+  return postTo(harness, '/v1/checks', body, idempotencyKey());
+}
+
+function postTo(
+  harness: Awaited<ReturnType<typeof makePaidApp>>,
+  url: string,
+  body: unknown,
+  key: string,
+) {
   return harness.app.inject({
     method: 'POST',
-    url: '/v1/checks',
+    url,
     headers: { ...harness.auth(), 'idempotency-key': key },
     payload: body as Record<string, unknown>,
   });
@@ -42,12 +57,12 @@ const APPLE_SERVICE = service({
   credits: 8,
 });
 
-describe('the offline tier inside a paid check', () => {
+describe('the offline tier (free /v1/checks)', () => {
   it('answers identity.model from the TAC directory, free, without a provider', async () => {
     const provider = new FakeProvider('fake', CLEAN);
     const harness = await makePaidApp({ providers: [provider], credits: 100 });
 
-    const report = (await post(harness, { imei: SENTINEL, capabilities: ['identity.model'] })).json<CheckReport>();
+    const report = (await postFree(harness, { imei: SENTINEL, capabilities: ['identity.model'] })).json<CheckReport>();
 
     expect(report.sections['identity.model']?.outcome).toBe('pass');
     expect(report.billing.credits_charged).toBe(0);
@@ -58,7 +73,7 @@ describe('the offline tier inside a paid check', () => {
   it('an unknown TAC is inconclusive, never a pass', async () => {
     const harness = await makePaidApp({ credits: 100 });
     const report = (
-      await post(harness, { imei: '999999990000008', capabilities: ['identity.model'] })
+      await postFree(harness, { imei: UNKNOWN_TAC_IMEI, capabilities: ['identity.model'] })
     ).json<CheckReport>();
 
     expect(report.sections['identity.model']?.outcome).toBe('inconclusive');

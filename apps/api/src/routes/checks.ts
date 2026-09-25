@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
+  CapabilitiesResponse,
   CheckRequest,
   CheckReport,
   Capability,
@@ -10,32 +10,18 @@ import {
 } from '@imei-check/contract';
 import { Imei } from '@imei-check/identity';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
-import { tenantOf } from '../auth/plugin.js';
-import { runCheck } from '../orchestrator/run-check.js';
+import { OFFLINE_CAPABILITIES, runCheck } from '../orchestrator/run-check.js';
 import type { AppServices } from '../services.js';
+import { CheckParams, IdempotentHeaders, getCheck, handleCheckPost, toSignal } from './check-shared.js';
 
 /**
- * The paid path.
+ * The free check, and the capabilities preview.
  *
- * Two rules govern the HTTP layer here and both are about not lying:
- *
- * - **200 whenever the request was well-formed and authorised**, even if every section came back
- *   `unavailable`. A 502 is indistinguishable to a naive client from "nothing wrong found", and
- *   the four arms exist precisely so that "we could not tell you" is expressible in the body.
- * - **`Idempotency-Key` is mandatory.** A retried paid check that runs twice charges twice; one
- *   that returns a different answer breaks the promise the header makes. Both are fixed by
- *   replaying the stored first response.
+ * `POST /v1/checks` answers from the offline TAC directory only. It is handed no router: "the free
+ * check never spends supplier money" holds because the call site cannot, not because a branch
+ * remembered not to. A paid capability asked of it is `unavailable(requires_deep_check)` -- the
+ * paid route is `POST /v1/deep_checks` (deep-checks.ts).
  */
-
-const IdempotentHeaders = z.object({
-  'idempotency-key': z
-    .string()
-    .min(8)
-    .max(200)
-    .describe('Required. A retry with the same key returns the first response and does not re-charge.'),
-});
-
-const CheckParams = z.object({ id: z.string().min(3).max(80) });
 
 export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
   return async (app) => {
@@ -44,8 +30,8 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
       {
         preHandler: app.requireTenant,
         schema: {
-          summary: 'Run a check against an IMEI. Costs credits.',
-          tags: ['paid'],
+          summary: 'Free check: offline data only. Never contacts a supplier.',
+          tags: ['free'],
           headers: IdempotentHeaders,
           body: CheckRequest,
           response: {
@@ -58,140 +44,37 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
         },
       },
       async (request, reply) => {
-        const tenant = tenantOf(request);
-        const idempotencyKey = request.headers['idempotency-key'];
-
-        const rate = services.limiter.take(`checks:${tenant.id}`, services.limits.checks);
-        if (!rate.allowed) {
-          return reply
-            .code(429)
-            .header('retry-after', String(rate.retryAfterSeconds))
-            .send({
-              error: {
-                code: 'rate_limited',
-                message: `Too many checks. Retry in ${rate.retryAfterSeconds}s.`,
-                request_id: request.id,
+        const capabilities = request.body.capabilities ?? services.defaultCapabilities;
+        return handleCheckPost({
+          request,
+          reply,
+          services,
+          tier: 'free',
+          imeiText: request.body.imei,
+          idempotencyKey: request.headers['idempotency-key'],
+          capabilities,
+          run: (ctx) =>
+            runCheck(
+              // No router: the free tier has nothing to buy with.
+              {
+                repos: services.repos,
+                cache: services.cache,
+                tacDirectory: app.tacDirectory,
+                metrics: services.metrics,
               },
-            });
-        }
-
-        const parsed = Imei.parse(request.body.imei);
-        if (parsed.kind !== 'valid') {
-          // The Luhn gate BEFORE any paid call. Free, and it kills most random enumeration --
-          // which matters because every paid call past this point spends our money.
-          return reply.code(400).send({
-            error: {
-              code: 'invalid_imei',
-              message:
-                parsed.kind === 'checksum_failed'
-                  ? 'The check digit does not match. One of the digits is wrong.'
-                  : parsed.kind === 'wrong_length'
-                    ? `An IMEI is 15 digits; ${parsed.digitsFound} were found.`
-                    : 'No digits were found in the text supplied.',
-              request_id: request.id,
-            },
-          });
-        }
-
-        const imei = parsed.imei;
-        const requested = request.body.capabilities ?? services.defaultCapabilities;
-
-        // Binds the key to the request. A client reusing one key for a different IMEI has a bug;
-        // silently serving them the previous device's report would be one on our side.
-        const requestDigest = createHash('sha256')
-          .update(`${imei.hmac(services.pepper)}|${[...requested].sort().join(',')}`, 'utf8')
-          .digest('hex');
-
-        /**
-         * Depth, where the token bucket above is rate.
-         *
-         * Taken BEFORE the idempotency claim on purpose: refusing after claiming would leave a
-         * claimed row with no stored response, and every retry of that key would then answer
-         * `check_in_progress` forever. Refusing first leaves nothing behind to retry around.
-         */
-        if (!services.concurrency.tryAcquire(tenant.id, services.maxConcurrentChecks)) {
-          return reply
-            .code(429)
-            .header('retry-after', '1')
-            .send({
-              error: {
-                code: 'too_many_concurrent_checks',
-                message:
-                  `At most ${services.maxConcurrentChecks} checks may be in flight at once on ` +
-                  'this account. Retry when one finishes.',
-                request_id: request.id,
+              {
+                tier: 'free',
+                tenantId: ctx.tenant.id,
+                tenantSalt: ctx.tenant.imeiSalt,
+                imei: ctx.imei,
+                imeiHash: ctx.imei.hmac(services.pepper),
+                capabilities,
+                maxAgeSeconds: request.body.max_age_seconds,
+                idempotencyKey: ctx.idempotencyKey,
+                signal: toSignal(request.raw),
               },
-            });
-        }
-
-        try {
-          const claim = await services.repos.idempotency.claim({
-            tenantId: tenant.id,
-            key: idempotencyKey,
-            requestDigest,
-          });
-
-          if (!claim.claimed) {
-            const existing = claim.existing;
-            if (existing.requestDigest !== requestDigest) {
-              return reply.code(409).send({
-                error: {
-                  code: 'idempotency_key_reused',
-                  message:
-                    'This Idempotency-Key was already used for a different request. Use a new key.',
-                  request_id: request.id,
-                },
-              });
-            }
-            if (existing.responseBody === undefined || existing.responseBody === null) {
-              // The first attempt is still in flight. Telling the client to retry is honest and
-              // costs nothing; returning a half-built report would not be.
-              return reply.code(409).send({
-                error: {
-                  code: 'check_in_progress',
-                  message: 'A check with this Idempotency-Key is still running. Retry shortly.',
-                  request_id: request.id,
-                },
-              });
-            }
-            // The stored first response, replayed verbatim. Re-running it would charge twice;
-            // recomputing it could answer differently for the same key.
-            return reply.code(200).send(existing.responseBody as CheckReport);
-          }
-
-          const report = await runCheck(
-            {
-              repos: services.repos,
-              router: services.router,
-              cache: services.cache,
-              tacDirectory: app.tacDirectory,
-              metrics: services.metrics,
-            },
-            {
-              tenantId: tenant.id,
-              tenantSalt: tenant.imeiSalt,
-              imei,
-              imeiHash: imei.hmac(services.pepper),
-              capabilities: requested,
-              maxAgeSeconds: request.body.max_age_seconds,
-              idempotencyKey,
-              signal: toSignal(request.raw),
-            },
-          );
-
-          await services.repos.idempotency.complete(tenant.id, idempotencyKey, {
-            checkId: report.check_id,
-            statusCode: 200,
-            responseBody: report,
-          });
-
-          // 200 even when every section is unavailable. Invariant 7.
-          return reply.code(200).send(report);
-        } finally {
-          // `finally`, not a call on each exit path: a throw from runCheck that did not release
-          // would permanently consume one of the tenant's slots until the process restarted.
-          services.concurrency.release(tenant.id);
-        }
+            ),
+        });
       },
     );
 
@@ -200,54 +83,13 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
       {
         preHandler: app.requireTenant,
         schema: {
-          summary: 'Fetch a check by id, including sections answered asynchronously since.',
-          tags: ['paid'],
+          summary: 'Fetch a free check by id.',
+          tags: ['free'],
           params: CheckParams,
           response: { 200: CheckReport, 401: ErrorResponse, 404: ErrorResponse },
         },
       },
-      async (request, reply) => {
-        const tenant = tenantOf(request);
-        const record = await services.repos.checks.byId(tenant.id, request.params.id);
-        if (record === undefined) {
-          return reply.code(404).send({
-            error: {
-              code: 'check_not_found',
-              message: 'No such check for this account.',
-              request_id: request.id,
-            },
-          });
-        }
-
-        const stored = await services.repos.checks.sections(record.id);
-        const sections = Object.fromEntries(
-          stored.map((s) => [s.capability, s.section]),
-        ) as CheckReport['sections'];
-
-        return {
-          schema_version: SCHEMA_VERSION,
-          check_id: record.id,
-          status: record.status,
-          subject: {
-            imei_masked: record.imeiMasked,
-            imei_hash: record.subjectHash,
-            ...(record.tac !== undefined ? { tac: record.tac } : {}),
-            luhn_valid: true,
-          },
-          requested_at: record.createdAt.toISOString(),
-          completed_at: record.completedAt?.toISOString() ?? null,
-          sections,
-          summary: {
-            verdict: record.verdict ?? 'undetermined',
-            reasons: [],
-            sections_unavailable: stored
-              .filter((s) => s.outcome === 'unavailable')
-              .map((s) => s.capability),
-          },
-          billing: { credits_charged: record.creditsCharged, breakdown: [] },
-          disclaimer: DISCLAIMER,
-        };
-      },
+      async (request, reply) => getCheck(request, reply, services, { id: request.params.id, tier: 'free' }),
     );
 
     /**
@@ -266,7 +108,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
           summary: 'What is checkable for a device and what it costs, before spending anything.',
           tags: ['paid'],
           body: z.object({ imei: z.string().min(1).max(200) }),
-          response: { 200: z.any(), 400: ErrorResponse, 401: ErrorResponse },
+          response: { 200: CapabilitiesResponse, 400: ErrorResponse, 401: ErrorResponse },
         },
       },
       async (request, reply) => {
@@ -284,21 +126,30 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
         const tac = imei.typeAllocationCode;
         const imeiHash = imei.hmac(services.pepper);
 
+        const manufacturer = app.tacDirectory.lookup(tac)?.manufacturer;
         const capabilities = [];
         for (const capability of Capability.options) {
-          const candidates = services.router.candidates(capability, tac, app.tacDirectory.lookup(tac)?.manufacturer);
+          const candidates = services.router.candidates(capability, tac, manufacturer);
           const cachedFields = await services.cache.read({
             imeiHash,
             capability,
             fields: [],
             now: new Date(),
           });
-          const offline = capability === 'identity.model';
+          const offline = OFFLINE_CAPABILITIES.includes(capability);
           const derived = capability === 'warranty.status';
           capabilities.push({
             capability,
             available: offline || derived || candidates.length > 0,
             credits: 0,
+            // Derived is still deep: warranty status needs a purchase date, which is bought.
+            tier: offline ? ('free' as const) : ('deep' as const),
+            // What a deep check would spend on it: for the derived one, the purchase date it needs.
+            cost_usd: offline
+              ? 0
+              : (derived
+                ? services.router.candidates('warranty.purchase_date', tac, manufacturer)
+                : candidates)[0]?.service.costUsd ?? 0,
             ...(candidates.length === 0 && !offline && !derived
               ? { reason: 'provider_no_coverage' as const }
               : {}),
@@ -315,12 +166,4 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
       },
     );
   };
-}
-
-/** Ties the provider calls to the client connection: a hung-up caller stops costing us money. */
-function toSignal(raw: { destroyed?: boolean; on?: (e: string, cb: () => void) => unknown }): AbortSignal {
-  const controller = new AbortController();
-  if (raw.destroyed === true) controller.abort();
-  else raw.on?.('aborted', () => controller.abort());
-  return controller.signal;
 }
