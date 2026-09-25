@@ -1,5 +1,5 @@
 meta {
-  name: Check — full report
+  name: Deep check — full report
   type: http
   seq: 1
   tags: [
@@ -8,7 +8,7 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/v1/checks
+  url: {{baseUrl}}/v1/deep_checks
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ headers {
 body:json {
   {
     "imei": "{{validImei}}",
-    "capabilities": ["identity.model", "blacklist.gsma"]
+    "capabilities": ["blacklist.gsma"]
   }
 }
 
@@ -95,10 +95,14 @@ tests {
 }
 
 docs {
-  The paid path. Requires `apiKey` in the environment and a server started with `DATABASE_URL`.
+  The deep, supplier-backed path. Requires `apiKey` in the environment and a server started with
+  `DATABASE_URL`. `identity.model` lives on `POST /v1/checks` (the free route) and is refused here
+  with `400 capability_not_in_tier` — this request only asks for `blacklist.gsma`.
 
   With no provider credentials configured, `blacklist.gsma` comes back
   `unavailable(provider_not_configured)` and costs nothing — which is the honest answer, and the
   assertions above still all hold. That is the point: the contract does not depend on a supplier
-  being up.
+  being up. Bounded by `DEEP_CHECK_WAIT_MS` from request start; a slow imei24 order can come back
+  `inconclusive(awaiting_provider)` instead of `unavailable` — see **02 Deep check — fetch by id**,
+  which polls the same check.
 }
