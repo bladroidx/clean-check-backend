@@ -116,8 +116,20 @@ before any merge that touches logging, persistence or a provider. `npm run seed:
 the `imei:reveal`-only key; `npm run imei:reveal -- <check_id> --reason "..."` reveals from a
 trusted host (same 10–500 char reason bound as the HTTP route). imei24's brand-specific services
 key off `applies_to_manufacturers`, matched against the TAC directory at runtime — there is no
-generated prefix list or script for it (see ADR-0002 / catalogue YAML comments; ruling R7).
+generated prefix list or script for it (see ADR-0002 / catalogue YAML comments).
 
-The deep routes exist only when `DATABASE_URL` is set. Without it the service runs the free
-offline tier — a supported mode, not a degraded one. Once `DATABASE_URL` is set, every route,
-including the free ones, requires the single seeded API key: there is exactly one caller.
+Every check route (the free `POST /v1/checks` and `/v1/capabilities` included, not just the deep
+ones) exists only when `DATABASE_URL` is set. Without it the service runs only the offline
+validator and TAC lookup — a supported mode, not a degraded one. Once `DATABASE_URL` is set, every
+route, including the free ones, requires the single seeded API key: there is exactly one caller.
+
+## Before deploying this branch
+
+Two changes live outside this repo and must land before or with this deploy, or the two services
+disagree about what "clean" means:
+
+- **check-this-phone-backend** must repoint its paid `/checks` call to `POST /v1/deep_checks` (plus
+  the `GET` poll route), and proxy `/v1/checks` as the free tier — spec §8.4.
+- **check-this-phone** (the Android app) must tolerate the new `Reason` arms `requires_deep_check`
+  and `spend_cap_reached` in its `ProbeResult` deserialiser, or an unrecognised arm breaks instead
+  of degrading — spec §8.5.
