@@ -1,0 +1,6 @@
+# Migrations as a one-shot image, for platforms (Coolify) where bind-mounting ./db from the repo is
+# not reliable. Same dbmate as the dev compose file; the migrations ship inside the image instead.
+FROM ghcr.io/amacneil/dbmate:2
+COPY db/migrations /db/migrations
+# No schema dump: the container filesystem is thrown away, and db/schema.sql lives in the repo.
+CMD ["--wait", "--no-dump-schema", "up"]

@@ -24,6 +24,9 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/packages ./packages
 COPY --from=build --chown=node:node /app/apps ./apps
 COPY --from=build --chown=node:node /app/testdata ./testdata
+# Operator scripts (seed:service-tenant, seed:admin-key, imei:reveal) run inside this container on
+# the host; they import only production dependencies and apps/api/dist.
+COPY --from=build --chown=node:node /app/scripts ./scripts
 COPY --from=build --chown=node:node /app/package.json ./
 USER node
 EXPOSE 3000
