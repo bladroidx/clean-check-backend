@@ -56,6 +56,13 @@ services:
   worker:
     build: .
     command: ['node', 'apps/worker/dist/main.js']
+    # Not the image's api-port HEALTHCHECK: a poll tick succeeded in the last 5 minutes.
+    healthcheck:
+      test: ['CMD', 'node', 'apps/worker/dist/healthcheck.js']
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 2
     depends_on:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }

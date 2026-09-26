@@ -212,6 +212,36 @@ describe('auth', () => {
     }
   });
 
+  it('checks the key before validating anything, on every protected route', async () => {
+    // Validation errors describe the request schema (required headers, body shape, id format). A
+    // caller without a key must learn none of it, and must not get a malformed request parsed and
+    // validated on our time: every protected route answers the same 401 first.
+    const harness = await makePaidApp();
+    const routes = [
+      { method: 'POST', url: '/v1/checks' },
+      { method: 'GET', url: '/v1/checks/not-an-id' },
+      { method: 'POST', url: '/v1/capabilities' },
+      { method: 'POST', url: '/v1/deep_checks' },
+      { method: 'GET', url: '/v1/deep_checks/not-an-id' },
+      { method: 'POST', url: '/v1/admin/checks/not-an-id/imei/reveal' },
+      { method: 'POST', url: '/v1/imei/validate' },
+      { method: 'GET', url: '/v1/tac/x' },
+      { method: 'GET', url: '/v1/attributions' },
+    ] as const;
+    for (const { method, url } of routes) {
+      const response = await harness.app.inject({
+        method,
+        url,
+        ...(method === 'POST' ? { payload: { unexpected: true } } : {}),
+      });
+      expect({ url, status: response.statusCode, code: response.json().error?.code }).toEqual({
+        url,
+        status: 401,
+        code: 'unauthorised',
+      });
+    }
+  });
+
   it('gives the same answer for a malformed key and an unknown one', async () => {
     const harness = await makePaidApp();
     const malformed = await harness.app.inject({

@@ -31,7 +31,7 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
     app.post(
       '/v1/deep_checks',
       {
-        preHandler: [app.requireTenant, app.requireScope('checks:write')],
+        onRequest: [app.requireTenant, app.requireScope('checks:write')],
         schema: {
           summary: 'Paid check via imei24. Waits up to DEEP_CHECK_WAIT_MS, then hand off to GET.',
           tags: ['paid'],
@@ -127,7 +127,7 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
     app.get(
       '/v1/deep_checks/:id',
       {
-        preHandler: [app.requireTenant, app.requireScope('checks:write')],
+        onRequest: [app.requireTenant, app.requireScope('checks:write')],
         schema: {
           summary: 'Fetch a deep check by id, including sections answered since. Never calls a supplier.',
           tags: ['paid'],

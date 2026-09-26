@@ -35,7 +35,7 @@ export function adminRoutes(services: AppServices): FastifyPluginAsyncZod {
     app.post(
       '/v1/admin/checks/:id/imei/reveal',
       {
-        preHandler: [app.requireTenant, app.requireScope('imei:reveal')],
+        onRequest: [app.requireTenant, app.requireScope('imei:reveal')],
         schema: {
           summary: 'Reveal a stored check\'s IMEI. Audited and rate-limited; imei:reveal scope only.',
           tags: ['admin'],

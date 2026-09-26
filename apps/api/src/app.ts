@@ -116,8 +116,8 @@ export async function buildApp(deps: AppDeps) {
     // has exactly one caller and nothing on it should be reachable without their key. It is also
     // a `checks:write` route like every other check route -- the admin key must not reach it.
     await app.register(async (instance) => {
-      instance.addHook('preHandler', instance.requireTenant);
-      instance.addHook('preHandler', instance.requireScope('checks:write'));
+      instance.addHook('onRequest', instance.requireTenant);
+      instance.addHook('onRequest', instance.requireScope('checks:write'));
       await instance.register(imeiRoutes);
       await instance.register(tacRoutes);
     });

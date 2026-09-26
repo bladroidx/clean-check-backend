@@ -11,6 +11,7 @@ import {
 } from '@imei-check/core';
 import type { Provider } from '@imei-check/providers';
 import { pollOrders } from './jobs/poll-orders.js';
+import { beat } from './heartbeat.js';
 
 /**
  * The worker loop.
@@ -113,6 +114,7 @@ async function loop(name: string, intervalMs: number, job: () => Promise<unknown
     try {
       const result = await job();
       logger.debug({ job: name, result, ms: Date.now() - startedAt }, 'job finished');
+      await beat().catch((error: unknown) => logger.warn({ err: error }, 'heartbeat not written'));
     } catch (error) {
       // A failing job must not kill the loop: the next tick is a free retry, and a crashed worker
       // silently stops settling orders that are still awaiting an answer.
