@@ -1,0 +1,62 @@
+name: promote
+
+# The only way code reaches production. Coolify deploys `release` to production (and `main` to
+# staging), so `release` must only ever fast-forward to a commit that main already built, tested
+# and ran on staging -- never take a commit of its own.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag for the promoted commit, e.g. v0.1.0'
+        required: true
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  checks: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like v1.2.3"; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::tag $VERSION already exists"; exit 1
+          fi
+
+      - name: Refuse unless main's head passed CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          for job in check image; do
+            conclusion=$(gh api "repos/${{ github.repository }}/commits/$sha/check-runs?check_name=$job" \
+              --jq '[.check_runs[] | select(.app.slug == "github-actions")][0].conclusion')
+            [ "$conclusion" = "success" ] || { echo "::error::$job is '$conclusion' on $sha, not success"; exit 1; }
+          done
+
+      - name: Fast-forward release and tag it
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --exit-code --heads origin release >/dev/null; then
+            git fetch origin release
+            git merge-base --is-ancestor origin/release HEAD \
+              || { echo "::error::release has commits that are not on main; fix main, never release"; exit 1; }
+          fi
+          git tag "$VERSION"
+          git push origin HEAD:refs/heads/release "refs/tags/$VERSION"
+          echo "Promoted $(git rev-parse --short HEAD) to release as $VERSION" >> "$GITHUB_STEP_SUMMARY"
