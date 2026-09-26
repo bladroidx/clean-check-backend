@@ -1,0 +1,53 @@
+name: deploy-staging
+
+# Deploys `main` to staging once CI has passed on it. Coolify stays private: this job can only SSH
+# to the VM with a key that authorized_keys pins to deploy/coolify-deploy-staging.sh, which calls
+# Coolify on localhost and waits for the deployment's outcome.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # A push to main that passed CI -- never a PR run, never a failed one.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    steps:
+      - name: Deploy through the VM's forced command
+        env:
+          DEPLOY_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ vars.STAGING_SSH_KNOWN_HOSTS }}
+          SSH_TARGET: ${{ vars.STAGING_SSH_TARGET }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy -o BatchMode=yes -o StrictHostKeyChecking=yes "$SSH_TARGET"
+
+      - name: Smoke the public health check
+        env:
+          STAGING_URL: ${{ vars.STAGING_URL }}
+        run: |
+          for _ in $(seq 1 12); do
+            curl -fsS -m 10 "$STAGING_URL/healthz" && exit 0
+            sleep 5
+          done
+          echo "::error::$STAGING_URL/healthz did not answer 200 within a minute of the deploy"
+          exit 1
