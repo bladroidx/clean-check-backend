@@ -30,15 +30,16 @@ app_status() {
   api "$API/applications/$APP_UUID" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status"))'
 }
 
-# The api has no public URL to smoke-test, so ask Coolify how the stack is doing. "healthy" means
-# every container with a healthcheck passes it; "unknown" means none fails but some (the worker)
-# have no healthcheck. Anything else after two minutes -- unhealthy, restarting, exited -- fails.
+# The api has no public URL to smoke-test, so ask Coolify how the stack is doing. Every long-running
+# container has a real healthcheck (the api answers /healthz, the worker's last poll tick
+# succeeded), so only "running:healthy" passes. Coolify reports "unknown" while healthchecks are
+# still starting; anything but healthy after two minutes -- unhealthy, restarting, exited -- fails.
 wait_until_running() {
   checks=0
   while [ "$checks" -lt 24 ]; do
     state=$(app_status)
     case "$state" in
-      running:healthy | running:unknown)
+      running:healthy)
         echo "application is $state"
         return 0 ;;
     esac

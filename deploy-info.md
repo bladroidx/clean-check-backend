@@ -97,8 +97,8 @@ This runs on every pull request and on every push to `main`.
      and waits up to 15 minutes. It exits non-zero if Coolify reports `failed` or `cancelled`, and
      the job fails with it.
   3. **Health check.** The same script then asks Coolify for the application's state until it is
-     `running:healthy` (or `running:unknown`: nothing failing, but the worker has no
-     healthcheck), and fails after two minutes otherwise. There is no public URL to call.
+     `running:healthy`, meaning the api answers `/healthz` and the worker's last poll tick
+     succeeded, and fails after two minutes otherwise. There is no public URL to call.
 - **Concurrency:** deploys are queued one at a time and never cancelled halfway.
 
 **Why SSH rather than a Coolify webhook.** Coolify's UI and API are a root-equivalent control
@@ -151,7 +151,7 @@ Coolify builds `docker-compose.prod.yml` from the git branch, on the VM itself (
 | `postgres` | `postgres:17-alpine` | The database. Named volume `pgdata`. **Not published**: only the stack's own network can reach it. |
 | `migrate` | `Dockerfile.migrate` (dbmate + `db/migrations`) | One-shot. It applies migrations and exits 0. `api` and `worker` wait for it. |
 | `api` | `Dockerfile` | Fastify HTTP API on port 3000. **No domain, so Traefik routes nothing to it.** Also on the external internal network as `imei-check`. It has a Docker `HEALTHCHECK` on `/healthz`. |
-| `worker` | `Dockerfile` (`apps/worker/dist/main.js`) | Background polling and jobs. It has no port and its healthcheck is disabled. |
+| `worker` | `Dockerfile` (`apps/worker/dist/main.js`) | Background polling and jobs. It has no port. It is healthy while a poll tick has succeeded in the last 5 minutes (a heartbeat file, `apps/worker/src/heartbeat.ts`). |
 
 Migrations run as their own step and never on app boot, so replicas can never race each other.
 They must be **expand/contract**: the previous image has to keep working against the new schema,
