@@ -30,8 +30,18 @@ Two Coolify environments, each deploying `docker-compose.prod.yml` on every push
 
 | Environment | Branch | Deploys when |
 |---|---|---|
-| staging | `main` | a PR is merged |
+| staging | `main` | CI passes on a push to `main` (`deploy-staging` workflow) |
 | production | `release` | the promote workflow runs |
+
+Coolify's API and UI are never exposed (port 8000 stays closed; admins use an SSH tunnel), so
+GitHub cannot call Coolify directly. Instead `.github/workflows/deploy-staging.yml` SSHes to the VM
+with the `STAGING_DEPLOY_KEY` secret of the `staging` GitHub environment (which only `main` may
+use). In the VM's `authorized_keys` that key is pinned with
+`restrict,command="/usr/local/bin/coolify-deploy-staging"` to
+[`deploy/coolify-deploy-staging.sh`](../deploy/coolify-deploy-staging.sh), which triggers the
+deployment through Coolify on localhost with a read+deploy-only token kept in
+`/etc/coolify-deploy/token`, and fails the job if the deployment fails. The job then checks the
+public `/healthz`. Re-run it by hand from Actions → deploy-staging → Run workflow.
 
 Staging and production have separate databases and separate secrets: never share a pepper or a
 keyring between them. Production must not take real IMEIs until the release blockers in the
