@@ -26,6 +26,28 @@ deployment_uuid() {
 deployment_status() {
   python3 -c 'import json,sys; print(json.load(sys.stdin).get("status"))'
 }
+app_status() {
+  api "$API/applications/$APP_UUID" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status"))'
+}
+
+# The api has no public URL to smoke-test, so ask Coolify how the stack is doing. "healthy" means
+# every container with a healthcheck passes it; "unknown" means none fails but some (the worker)
+# have no healthcheck. Anything else after two minutes -- unhealthy, restarting, exited -- fails.
+wait_until_running() {
+  checks=0
+  while [ "$checks" -lt 24 ]; do
+    state=$(app_status)
+    case "$state" in
+      running:healthy | running:unknown)
+        echo "application is $state"
+        return 0 ;;
+    esac
+    checks=$((checks + 1))
+    sleep 5
+  done
+  echo "application is '$state' two minutes after the deployment finished" >&2
+  return 1
+}
 
 deployment=$(api -X POST "$API/deploy" -d "{\"uuid\":\"$APP_UUID\"}" \
   | deployment_uuid)
@@ -38,7 +60,8 @@ while [ "$polls" -lt "$TIMEOUT_POLLS" ]; do
   case "$status" in
     finished)
       echo "deployment $deployment finished"
-      exit 0 ;;
+      wait_until_running
+      exit $? ;;
     failed | cancelled*)
       echo "deployment $deployment $status -- see its log in Coolify" >&2
       exit 1 ;;

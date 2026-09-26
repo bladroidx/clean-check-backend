@@ -2,7 +2,8 @@ name: deploy-staging
 
 # Deploys `main` to staging once CI has passed on it. Coolify stays private: this job can only SSH
 # to the VM with a key that authorized_keys pins to deploy/coolify-deploy-staging.sh, which calls
-# Coolify on localhost and waits for the deployment's outcome.
+# Coolify on localhost, waits for the deployment's outcome and then for the stack to be healthy.
+# There is no public URL to smoke-test: the api is reachable only on the VM's internal network.
 on:
   workflow_run:
     workflows: [ci]
@@ -25,9 +26,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment:
-      name: staging
-      url: ${{ vars.STAGING_URL }}
+    environment: staging
     steps:
       - name: Deploy through the VM's forced command
         env:
@@ -41,13 +40,3 @@ jobs:
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           ssh -i ~/.ssh/deploy -o BatchMode=yes -o StrictHostKeyChecking=yes "$SSH_TARGET"
 
-      - name: Smoke the public health check
-        env:
-          STAGING_URL: ${{ vars.STAGING_URL }}
-        run: |
-          for _ in $(seq 1 12); do
-            curl -fsS -m 10 "$STAGING_URL/healthz" && exit 0
-            sleep 5
-          done
-          echo "::error::$STAGING_URL/healthz did not answer 200 within a minute of the deploy"
-          exit 1
