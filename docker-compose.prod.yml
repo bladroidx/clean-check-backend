@@ -76,9 +76,14 @@ services:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     environment: *app_env
-    # The image's HEALTHCHECK probes the api's port; the worker has none.
+    # The image's HEALTHCHECK probes the api's port, which the worker does not serve. Healthy means
+    # a poll tick succeeded in the last 5 minutes (apps/worker/src/heartbeat.ts).
     healthcheck:
-      disable: true
+      test: ['CMD', 'node', 'apps/worker/dist/healthcheck.js']
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 2
     restart: unless-stopped
 
 networks:
