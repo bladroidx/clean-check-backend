@@ -12,6 +12,10 @@ import { bearerFrom, hashApiKey, looksLikeApiKey } from './keys.js';
  * Every failure path here returns the SAME body and the same 401. Distinguishing "no such key"
  * from "revoked key" from "expired key" tells an attacker which of their guesses was structurally
  * right, and tells a legitimate operator nothing they cannot get from their dashboard.
+ *
+ * Routes run it as an `onRequest` hook, never `preHandler`: Fastify validates headers, params and
+ * body between the two, so a `preHandler` guard would answer a keyless caller with a 400 that
+ * describes the request schema. It needs nothing but the Authorization header.
  */
 
 declare module 'fastify' {
