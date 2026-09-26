@@ -20,15 +20,19 @@ the pipeline, and every tool involved. The one-line version:
                                                                                                      ▼
                                                                                               Coolify ─▶ staging stack
                                                                                                      │   (api, worker,
-                                  deploy-staging ◀── /healthz 200 over HTTPS ────────────────────────┘    postgres)
+                                  deploy-staging ◀── Coolify: running + healthy ──────────────────────┘    postgres)
 
  Actions → promote vX.Y.Z ──▶ release fast-forwards to main + tag ──▶ Coolify ─▶ production stack   (not live yet)
 ```
 
 | Environment | Git branch | Deploys when | URL |
 |---|---|---|---|
-| **staging** | `main` | automatically, after `ci` passes on a push to `main` | https://imei-staging.144.24.200.242.sslip.io |
+| **staging** | `main` | automatically, after `ci` passes on a push to `main` | none (private): `http://imei-check:3000` on the VM's internal network |
 | **production** | `release` | someone runs the `promote` workflow | not configured yet (see §8) |
+
+**imei-check is private.** It has no public URL. Its only caller is the trustmob-check backend,
+which runs on the same VM, and the two talk over a Docker network that only their two `api`
+containers join (§5.3).
 
 ---
 
@@ -92,8 +96,9 @@ This runs on every pull request and on every push to `main`.
   2. **Deploy.** The VM runs `coolify-deploy-staging`, which tells Coolify on `localhost` to deploy
      and waits up to 15 minutes. It exits non-zero if Coolify reports `failed` or `cancelled`, and
      the job fails with it.
-  3. **Smoke-test.** The job calls `GET /healthz` on the public HTTPS URL until it returns 200, and
-     fails after about a minute.
+  3. **Health check.** The same script then asks Coolify for the application's state until it is
+     `running:healthy` (or `running:unknown`: nothing failing, but the worker has no
+     healthcheck), and fails after two minutes otherwise. There is no public URL to call.
 - **Concurrency:** deploys are queued one at a time and never cancelled halfway.
 
 **Why SSH rather than a Coolify webhook.** Coolify's UI and API are a root-equivalent control
@@ -145,7 +150,7 @@ Coolify builds `docker-compose.prod.yml` from the git branch, on the VM itself (
 |---|---|---|
 | `postgres` | `postgres:17-alpine` | The database. Named volume `pgdata`. **Not published**: only the stack's own network can reach it. |
 | `migrate` | `Dockerfile.migrate` (dbmate + `db/migrations`) | One-shot. It applies migrations and exits 0. `api` and `worker` wait for it. |
-| `api` | `Dockerfile` | Fastify HTTP API on port 3000, which Traefik exposes on the environment's domain. It has a Docker `HEALTHCHECK` on `/healthz`. |
+| `api` | `Dockerfile` | Fastify HTTP API on port 3000. **No domain, so Traefik routes nothing to it.** Also on the external internal network as `imei-check`. It has a Docker `HEALTHCHECK` on `/healthz`. |
 | `worker` | `Dockerfile` (`apps/worker/dist/main.js`) | Background polling and jobs. It has no port and its healthcheck is disabled. |
 
 Migrations run as their own step and never on app boot, so replicas can never race each other.
@@ -160,6 +165,32 @@ or rolling back breaks. Promote to production only after a migration has run on 
 | 80 / 443 | internet | Traefik. 80 only redirects to 443 and answers Let's Encrypt challenges |
 | 8000 | **nobody** | Coolify UI/API. Reach it with `ssh -L 8000:localhost:8000 ubuntu@144.24.200.242` → http://localhost:8000 |
 | 5432 | **nobody** | Postgres stays inside Docker |
+| 3000 (imei-check api) | **only the trustmob-check api container** | the internal Docker network below |
+
+**Private service-to-service network.** Each Coolify app gets its own Docker network, so two apps
+cannot see each other by default. One extra network per environment,
+`imei-check-staging-internal`, is created once on the host
+(`sudo docker network create imei-check-staging-internal`) and named in both apps' compose files:
+
+```
+ trustmob-check stack                          imei-check stack
+ ┌───────────────────────────┐                 ┌──────────────────────────────┐
+ │ api ──────────────────────┼── imei-check-  ─┼─▶ api  (alias: imei-check)   │
+ │ admin-api   postgres      │   staging-      │    worker   postgres         │
+ └───────────────────────────┘   internal      └──────────────────────────────┘
+```
+
+- **Only the two `api` containers join it.** Neither database, the worker or the admin API is on
+  it, so trustmob-check cannot reach imei-check's Postgres, or the other way round.
+- **trustmob-check calls** `IMEI_CHECK_BASE_URL=http://imei-check:3000`. Plain HTTP is fine: the
+  traffic never leaves the host. The API key is still required on every request.
+- **imei-check sets** `IMEI_INTERNAL_NETWORK=imei-check-staging-internal`. The compose file fails
+  to deploy if it is unset or if the network does not exist.
+- **No supplier callbacks.** `PUBLIC_BASE_URL` is empty, so no `feedback_url` is sent to imei24.
+  Express answers still arrive within the request. Standard (2–24 h) orders settle through the
+  worker's poll loop (5 min backoff, growing to 1 h) instead of an instant callback. To take
+  callbacks later, publish only `/internal/providers/*/feedback` via Traefik and set
+  `PUBLIC_BASE_URL`, never the whole API.
 
 Two firewalls must agree: the Oracle **VCN Security List** (ingress rules) and the VM's own
 **iptables**. Both allow only 22, 80 and 443. The iptables rules are saved with
@@ -176,7 +207,7 @@ Two firewalls must agree: the Oracle **VCN Security List** (ingress rules) and t
 | Staging deploy SSH private key | GitHub → environment `staging` → secret `STAGING_DEPLOY_KEY` | disk (the local copy was deleted after upload) |
 | Service API key for check-this-phone-backend | printed once by `npm run seed:service-tenant`, stored by the caller | git |
 
-Non-secret deploy settings are GitHub **variables** on the `staging` environment: `STAGING_URL`,
+Non-secret deploy settings are GitHub **variables** on the `staging` environment:
 `STAGING_SSH_TARGET` and `STAGING_SSH_KNOWN_HOSTS`.
 
 Keep an **offline copy** (password manager) of every environment's `SERVER_PEPPER` and
@@ -200,6 +231,7 @@ as `${VAR:?}`, so a deploy with a missing secret fails before anything starts.
 | Roll back | Revert PR on `main` (then promote for production). In an emergency: Coolify → the app → Deployments → redeploy an earlier one |
 | Open the Coolify UI | `ssh -L 8000:localhost:8000 ubuntu@144.24.200.242`, then http://localhost:8000 |
 | Look at logs | Coolify → the app → Logs, or on the VM `sudo docker logs <container>` |
+| Call imei-check by hand | It has no public URL. On the VM: `sudo docker run --rm --network imei-check-staging-internal curlimages/curl -s http://imei-check:3000/healthz` |
 | First deploy of a new environment | Run `npm run seed:service-tenant` in the `api` container's terminal. It prints the caller's API key once. |
 | HTTPS certificate stuck on "TRAEFIK DEFAULT CERT" | Usually issuance failed while ports 80/443 were closed. Open them, then `sudo docker restart coolify-proxy` so Traefik retries. |
 
@@ -228,7 +260,7 @@ as `${VAR:?}`, so a deploy with a missing secret fails before anything starts.
 | **Git + GitHub** | Source of truth, pull requests, branch protection, environments, secrets and variables |
 | **GitHub Actions** | `ci` (tests + ARM image build), `deploy-staging`, `promote` |
 | **GitHub CLI (`gh`)** | Creating PRs, auto-merge, setting environment secrets and variables from the terminal |
-| **Docker / Docker Compose** | Packaging: one app image (`Dockerfile`), one migration image, one compose stack per environment |
+| **Docker / Docker Compose** | Packaging: one app image (`Dockerfile`), one migration image, one compose stack per environment, and the external network that links the two `api` containers |
 | **dbmate** | Postgres migrations (`db/migrations`), run as a one-shot container |
 | **PostgreSQL 17** | The database, one per environment |
 | **Node.js 22 + Fastify** | The `api` and `worker` processes |
@@ -236,6 +268,6 @@ as `${VAR:?}`, so a deploy with a missing secret fails before anything starts.
 | **Coolify** | Self-hosted PaaS on the VM: builds from git, runs the compose stacks, manages env vars, logs and redeploys |
 | **Traefik** | Reverse proxy in front of every app, with automatic Let's Encrypt HTTPS |
 | **Let's Encrypt** | Free TLS certificates, renewed automatically |
-| **sslip.io** | Free wildcard DNS (`*.144.24.200.242.sslip.io` → the VM). Swap for a real domain later: point an A record at the VM and change the domain in Coolify and `PUBLIC_BASE_URL`. |
+| **sslip.io** | Free wildcard DNS (`*.144.24.200.242.sslip.io` → the VM). Used by the trustmob-check public API; imei-check itself has no domain. |
 | **OpenSSH** | Admin access, the Coolify tunnel, and the pinned deploy key (`authorized_keys` `restrict,command=`) |
 | **iptables + netfilter-persistent** | The VM's own firewall, kept across reboots |

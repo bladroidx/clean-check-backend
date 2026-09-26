@@ -117,6 +117,24 @@ describe('loadConfig', () => {
     expect(c.IMEI24_DAILY_SPEND_USD).toBe(10);
   });
 
+  describe('PUBLIC_BASE_URL', () => {
+    // A private deployment (reachable only on an internal Docker network) has no public URL, and
+    // compose can only pass an unset variable through as the empty string.
+    it('treats an empty value as unset: no feedback_url, orders settle by polling', () => {
+      expect(loadConfig({ ...base, PUBLIC_BASE_URL: '' }).PUBLIC_BASE_URL).toBeUndefined();
+    });
+
+    it('still refuses a value that is not a URL', () => {
+      expect(() => loadConfig({ ...base, PUBLIC_BASE_URL: 'imei-check' })).toThrow(/PUBLIC_BASE_URL/);
+    });
+
+    it('keeps a real URL', () => {
+      expect(loadConfig({ ...base, PUBLIC_BASE_URL: 'https://imei.example.test' }).PUBLIC_BASE_URL).toBe(
+        'https://imei.example.test',
+      );
+    });
+  });
+
   describe('IMEI_ENCRYPTION_KEYS (ADR-0007)', () => {
     it('is not required without a database', () => {
       expect(() => loadConfig(base)).not.toThrow();

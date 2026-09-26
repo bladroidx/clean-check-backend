@@ -1,8 +1,12 @@
 # Production stack for Coolify ("Docker Compose" build pack) or any single Docker host. Unlike
 # docker-compose.yml there is no secret in this file and nothing is published to the host: Postgres
-# is reachable only on the compose network, and the api only through the platform's proxy (in
-# Coolify, give the `api` service a domain with port 3000 -- or none, if the one caller shares its
-# network).
+# is reachable only on the compose network.
+#
+# The api is private. Its one caller (the trustmob-check backend, on the same host) reaches it as
+# http://imei-check:3000 over the external network named by IMEI_INTERNAL_NETWORK, which only the
+# two api containers join -- never either database. Create it once per environment on the host:
+#   docker network create imei-check-staging-internal
+# Give the `api` service no domain in Coolify, so nothing routes to it from the internet.
 #
 # Every `${VAR:?}` must be set in the platform's environment, or the deploy fails before anything
 # starts. SERVER_PEPPER and IMEI_ENCRYPTION_KEYS must also be kept somewhere off this host: losing
@@ -47,9 +51,9 @@ services:
       DATABASE_URL: postgres://imei:${POSTGRES_PASSWORD:?}@postgres:5432/imei_check?sslmode=disable
       # `1:<base64 of 32 random bytes>` (ADR-0007). The api refuses to boot without it.
       IMEI_ENCRYPTION_KEYS: ${IMEI_ENCRYPTION_KEYS:?}
-      # Where an async supplier POSTs its answer back to: this service's public https URL. Wrong
-      # here means standard orders are placed and their answers land nowhere.
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?}
+      # Where an async supplier POSTs its answer back to. Empty while the api is private: no
+      # feedback_url is sent and the worker's poll loop settles standard orders instead.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Both empty = free tier only; one without the other refuses to boot.
       IMEI24_BASE_URL: ${IMEI24_BASE_URL:-https://pro.imei24.com}
       IMEI24_USERNAME: ${IMEI24_USERNAME:-}
@@ -57,6 +61,10 @@ services:
       IMEI24_DAILY_SPEND_USD: ${IMEI24_DAILY_SPEND_USD:-10}
       DEEP_CHECK_WAIT_MS: ${DEEP_CHECK_WAIT_MS:-10000}
     expose: ['3000']
+    networks:
+      default:
+      internal:
+        aliases: [imei-check]
     restart: unless-stopped
 
   # A separate process, not a thread in the API: a poll storm must not consume the connection
@@ -72,6 +80,11 @@ services:
     healthcheck:
       disable: true
     restart: unless-stopped
+
+networks:
+  internal:
+    external: true
+    name: ${IMEI_INTERNAL_NETWORK:?}
 
 volumes:
   pgdata:

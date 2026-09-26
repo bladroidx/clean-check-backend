@@ -58,9 +58,11 @@ export const ConfigSchema = z.object({
 
   /**
    * Public base URL, used to build the `feedback_url` an async supplier POSTs back to.
-   * Wrong here means standard orders are placed and their answers land nowhere.
+   * Wrong here means standard orders are placed and their answers land nowhere. Unset (or empty,
+   * which is how compose passes an unset variable) is a private deployment: no `feedback_url` is
+   * sent and the worker's poll loop settles every standard order instead.
    */
-  PUBLIC_BASE_URL: z.string().url().optional(),
+  PUBLIC_BASE_URL: z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional()),
 
   IMEI24_BASE_URL: z
     .string()
