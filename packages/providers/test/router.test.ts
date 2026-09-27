@@ -172,8 +172,8 @@ describe('failover', () => {
     expect(result.outcome).toEqual(CLEAN);
   });
 
-  it('does not count our own lock or spend-cap refusals against the supplier breaker', async () => {
-    for (const reason of ['rate_limited', 'spend_cap_reached'] as const) {
+  it('does not count our own lock, spend-cap or disabled-service refusals against the supplier breaker', async () => {
+    for (const reason of ['rate_limited', 'spend_cap_reached', 'service_disabled'] as const) {
       const breakers = new BreakerRegistry();
       const refused = new FakeProvider('a', { kind: 'failed', reason, detail: 'ours' });
       for (let i = 0; i < 10; i += 1) {

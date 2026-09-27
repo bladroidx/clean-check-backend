@@ -118,6 +118,55 @@ export interface ProviderCallRepo {
   costSince(tenantId: string, since: Date): Promise<number>;
   /** Same shape as `costSince`, keyed by provider rather than tenant -- the daily spend cap. */
   costSinceForProvider(providerId: string, since: Date): Promise<number>;
+  /**
+   * What our own books say we spent with a provider in `[from, to)`. The balance reconciler
+   * compares this against how far the supplier's real balance actually fell over the same window.
+   */
+  costBetweenForProvider(providerId: string, from: Date, to: Date): Promise<number>;
+}
+
+/**
+ * One reading of a supplier's REAL prepaid balance (DHRU `accountinfo`).
+ *
+ * Every cost we record is the catalogue price we checked in, so our books can only ever agree with
+ * themselves. The balance is the one number the supplier controls: a fall larger than what we
+ * recorded is a silent reprice (or spend we did not see), and nothing else can detect it.
+ */
+export interface BalanceSnapshot {
+  readonly providerId: string;
+  readonly balanceUsd: number;
+  readonly takenAt: Date;
+}
+
+export interface BalanceSnapshotRepo {
+  record(snapshot: BalanceSnapshot): Promise<void>;
+  latest(providerId: string): Promise<BalanceSnapshot | undefined>;
+}
+
+/**
+ * A service switched off at runtime by the catalogue drift job, on top of the checked-in YAML.
+ *
+ * The YAML price is what the spend cap sums, so once the supplier's live price is higher than it,
+ * every purchase is under-counted. The only safe response is to stop buying until a human
+ * reprices the catalogue -- and a human, not the job, lifts the override.
+ */
+export interface ServiceOverride {
+  readonly providerId: string;
+  readonly serviceId: string;
+  readonly reason: 'price_increased' | 'missing_from_supplier_list';
+  readonly cataloguePriceUsd: number;
+  /** `undefined` when the service was missing from the supplier's list altogether. */
+  readonly livePriceUsd: number | undefined;
+  readonly detectedAt: Date;
+}
+
+export interface ServiceOverrideRepo {
+  /** Upsert: re-detecting a disabled service refreshes its live price, never re-enables it. */
+  disable(override: ServiceOverride): Promise<void>;
+  isDisabled(providerId: string, serviceId: string): Promise<boolean>;
+  list(): Promise<readonly ServiceOverride[]>;
+  /** Returns whether there was an override to lift. */
+  clear(providerId: string, serviceId: string): Promise<boolean>;
 }
 
 /**
@@ -246,5 +295,7 @@ export interface Repositories {
   readonly idempotency: IdempotencyRepo;
   readonly locks: ProviderLock;
   readonly reveals: ImeiRevealRepo;
+  readonly balances: BalanceSnapshotRepo;
+  readonly serviceOverrides: ServiceOverrideRepo;
   close(): Promise<void>;
 }

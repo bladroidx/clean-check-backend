@@ -69,6 +69,51 @@ describe('GuardedProvider', () => {
     expect(inner.calls).toBe(0);
   });
 
+  it('refuses a service the drift job disabled, before the spend cap and without calling the supplier', async () => {
+    const repos = new MemoryRepositories();
+    await repos.serviceOverrides.disable({
+      providerId: 'imei24', serviceId: '486', reason: 'price_increased',
+      cataloguePriceUsd: 0.1, livePriceUsd: 1, detectedAt: new Date(),
+    });
+    const inner = new Slow(1);
+    const p = new GuardedProvider(inner, {
+      lock: repos.locks, lockWaitMs: 100, dailySpendUsd: 10, costSince: async () => 0,
+      isDisabled: (id, serviceId) => repos.serviceOverrides.isDisabled(id, serviceId),
+    });
+    expect(await p.execute(req())).toMatchObject({ kind: 'failed', reason: 'service_disabled', notSent: true });
+    expect(inner.calls).toBe(0);
+
+    await repos.serviceOverrides.clear('imei24', '486');
+    expect((await p.execute(req())).kind).toBe('answered');
+  });
+
+  it('does not buy when it cannot tell whether the service is disabled', async () => {
+    const repos = new MemoryRepositories();
+    const inner = new Slow(1);
+    const p = new GuardedProvider(inner, {
+      lock: repos.locks, lockWaitMs: 100, dailySpendUsd: 10, costSince: async () => 0,
+      isDisabled: async () => { throw new Error('db down'); },
+    });
+    expect(await p.execute(req())).toMatchObject({ kind: 'failed', reason: 'service_disabled', notSent: true });
+    expect(inner.calls).toBe(0);
+  });
+
+  it('reads the price list under the one-job lock, and a busy lock is "unknown", not "empty"', async () => {
+    const repos = new MemoryRepositories();
+    class Priced extends Slow {
+      async servicePrices(): Promise<ReadonlyMap<string, number>> { return new Map([['486', 0.1]]); }
+    }
+    const p = new GuardedProvider(new Priced(1), { lock: repos.locks, lockWaitMs: 20, dailySpendUsd: 10, costSince: async () => 0 });
+    expect(await p.servicePrices?.(AbortSignal.timeout(1000))).toEqual(new Map([['486', 0.1]]));
+
+    let release: () => void = () => {};
+    const holder = repos.locks.withLock('provider:imei24', 1_000, () => new Promise<void>((r) => { release = r; }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await p.servicePrices?.(AbortSignal.timeout(1000))).toBeUndefined();
+    release();
+    await holder;
+  });
+
   it('polling is not blocked by the spend cap (it costs nothing)', async () => {
     const repos = new MemoryRepositories();
     class WithPoll extends Slow {

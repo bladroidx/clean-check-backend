@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher, type Dispatcher } from 'undici';
-import { DhruLegacyProvider } from '../src/dhru/legacy.js';
+import { DhruLegacyProvider, parseServicePrices } from '../src/dhru/legacy.js';
 import { BUILTIN_LEXICONS } from '../src/normalise/lexicons.js';
 import { classifyRejection, classifyBusy, ProviderTransportError, toFailure } from '../src/dhru/transport.js';
 import type { CatalogueService } from '../src/types.js';
@@ -152,6 +152,63 @@ describe('legacy transport over HTTP', () => {
   it('reports unreachable rather than throwing when health fails', async () => {
     agent.get(BASE).intercept({ path: '/api/index.php', method: 'POST' }).reply(500, '');
     expect(await legacy().health(AbortSignal.timeout(5000))).toEqual({ reachable: false });
+  });
+
+  it('reads the live price list from the nested DHRU imeiservicelist shape', async () => {
+    agent
+      .get(BASE)
+      .intercept({ path: '/api/index.php', method: 'POST' })
+      .reply(200, {
+        SUCCESS: [
+          {
+            MESSAGE: 'IMEI Service List',
+            LIST: {
+              Blacklist: {
+                GROUPNAME: 'Blacklist',
+                SERVICES: {
+                  '486': { SERVICEID: 486, SERVICENAME: 'Global Blacklist checker', CREDIT: '0.10' },
+                  '690': { SERVICEID: 690, SERVICENAME: 'Apple', CREDIT: 0.34 },
+                },
+              },
+            },
+          },
+        ],
+      });
+
+    const prices = await legacy().servicePrices(AbortSignal.timeout(5000));
+    expect(prices).toEqual(
+      new Map([
+        ['486', 0.1],
+        ['690', 0.34],
+      ]),
+    );
+  });
+
+  /**
+   * An unreadable list must not come back as an empty map: the drift job would read that as
+   * "every service vanished" and switch the whole catalogue off on a supplier format change.
+   */
+  it('reports an unreadable price list as unknown, never as empty', async () => {
+    agent.get(BASE).intercept({ path: '/api/index.php', method: 'POST' }).reply(200, { SUCCESS: [{ MESSAGE: 'ok' }] });
+    expect(await legacy().servicePrices(AbortSignal.timeout(5000))).toBeUndefined();
+    agent.get(BASE).intercept({ path: '/api/index.php', method: 'POST' }).reply(500, '');
+    expect(await legacy().servicePrices(AbortSignal.timeout(5000))).toBeUndefined();
+    agent.get(BASE).intercept({ path: '/api/index.php', method: 'POST' }).reply(200, { ERROR: [{ MESSAGE: 'Auth failed' }] });
+    expect(await legacy().servicePrices(AbortSignal.timeout(5000))).toBeUndefined();
+  });
+
+  it('leaves out a price it cannot read strictly, rather than misreading a rise as a fall', () => {
+    const prices = parseServicePrices(
+      JSON.stringify({
+        SUCCESS: [{ LIST: { g: { SERVICES: {
+          a: { SERVICEID: 1, CREDIT: '0,75' },
+          b: { SERVICEID: 2, CREDIT: '1,200.00' },
+          c: { SERVICEID: 3, CREDIT: ' 0.10 ' },
+          d: { SERVICEID: 4, CREDIT: '' },
+        } } } }],
+      }),
+    );
+    expect(prices).toEqual(new Map([['3', 0.1]]));
   });
 
   it('polls an open order for the service that placed it', async () => {

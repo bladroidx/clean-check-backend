@@ -379,8 +379,9 @@ function failureReason(
     case 'rate_limited':
       return 'rate_limited_upstream';
     case 'no_provider_configured':
-      // We have no supplier for this capability at all. Honest, and actionable by us rather than
-      // by the caller.
+    case 'service_disabled':
+      // We have no supplier for this capability at all -- or the only one was switched off by the
+      // price-drift job. Honest, and actionable by us rather than by the caller.
       return 'provider_not_configured';
     case 'auth_error':
     case 'insufficient_provider_balance':

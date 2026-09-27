@@ -1,16 +1,23 @@
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import pino from 'pino';
 import {
+  DEFAULT_RETENTION,
   buildProviders,
   GuardedProvider,
   Metrics,
   PgRepositories,
+  assertRetentionPolicy,
+  createLogger,
   createPool,
   imei24CredentialsFromEnv,
+  runRetention,
   type Imei24Credentials,
+  type RetentionPolicy,
 } from '@imei-check/core';
 import type { Provider } from '@imei-check/providers';
 import { pollOrders } from './jobs/poll-orders.js';
+import { reconcileBalances, type Log } from './jobs/reconcile-balance.js';
+import { detectCatalogueDrift } from './jobs/catalogue-drift.js';
 import { beat } from './heartbeat.js';
 
 /**
@@ -25,9 +32,36 @@ import { beat } from './heartbeat.js';
  */
 
 const DATABASE_URL = process.env['DATABASE_URL'];
-const POLL_INTERVAL_MS = Number(process.env['WORKER_POLL_INTERVAL_MS'] ?? 30_000);
 
-const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+// The same guarded logger as the API: every line is scanned for IMEI-shaped digits (throws outside
+// production, redacts in it), and pg errors lose the fields that echo row data.
+const logger = createLogger({
+  level: process.env['LOG_LEVEL'] ?? 'info',
+  nodeEnv: process.env['NODE_ENV'] ?? 'development',
+});
+
+/**
+ * A whole number of ms >= `min`, or refuse to boot. `Number('abc')` is NaN, and a NaN interval
+ * makes the loop spin flat out -- hammering the supplier and holding its one-job lock.
+ */
+function intervalFromEnv(name: string, fallback: number, min = 1_000): number {
+  const raw = process.env[name];
+  const value = raw === undefined || raw === '' ? fallback : Number(raw);
+  if (!Number.isInteger(value) || value < min) {
+    logger.error({ var: name }, `${name} must be a whole number of milliseconds >= ${min}`);
+    process.exit(1);
+  }
+  return value;
+}
+
+const POLL_INTERVAL_MS = intervalFromEnv('WORKER_POLL_INTERVAL_MS', 30_000);
+const BALANCE_RECONCILE_INTERVAL_MS = intervalFromEnv('BALANCE_RECONCILE_INTERVAL_MS', 60 * 60_000);
+const CATALOGUE_DRIFT_INTERVAL_MS = intervalFromEnv('CATALOGUE_DRIFT_INTERVAL_MS', 24 * 60 * 60_000);
+const RETENTION_INTERVAL_MS = intervalFromEnv('RETENTION_INTERVAL_MS', 24 * 60 * 60_000);
+/** A run that could not reach the supplier (lock busy, list unreadable) retries this soon. */
+const INCOMPLETE_RETRY_MS = intervalFromEnv('WORKER_INCOMPLETE_RETRY_MS', 5 * 60_000);
+/** `/metrics` only, on the internal network (never published). `0` turns it off. */
+const WORKER_METRICS_PORT = intervalFromEnv('WORKER_METRICS_PORT', 9464, 0);
 
 if (DATABASE_URL === undefined) {
   logger.error('DATABASE_URL is required for the worker; the free tier needs no worker at all');
@@ -71,11 +105,22 @@ try {
   process.exit(1);
 }
 
-const repos = new PgRepositories(
-  createPool(DATABASE_URL, {
-    onError: (error) => logger.error({ err: error }, 'database pool error (connection dropped)'),
-  }),
-);
+// A retention window typo ("18" for "180") would drop live data: refuse to boot instead.
+const retention: RetentionPolicy = {
+  checksDays: Number(process.env['CHECKS_RETENTION_DAYS'] ?? DEFAULT_RETENTION.checksDays),
+  providerCallsDays: Number(process.env['PROVIDER_CALLS_RETENTION_DAYS'] ?? DEFAULT_RETENTION.providerCallsDays),
+};
+try {
+  assertRetentionPolicy(retention);
+} catch (error) {
+  logger.error(error instanceof Error ? error.message : 'invalid retention policy');
+  process.exit(1);
+}
+
+const pool = createPool(DATABASE_URL, {
+  onError: (error) => logger.error({ err: error }, 'database pool error (connection dropped)'),
+});
+const repos = new PgRepositories(pool);
 const metrics = new Metrics();
 
 const built = buildProviders({
@@ -97,6 +142,7 @@ const providers: readonly Provider[] = built.providers.map(
       lockWaitMs: 5_000,
       dailySpendUsd,
       costSince: (providerId, since) => repos.providerCalls.costSinceForProvider(providerId, since),
+      isDisabled: (providerId, serviceId) => repos.serviceOverrides.isDisabled(providerId, serviceId),
     }),
 );
 
@@ -108,19 +154,43 @@ const tacDirectory = { lookup: () => undefined, version: 'worker', size: 0, attr
 
 let running = true;
 
-async function loop(name: string, intervalMs: number, job: () => Promise<unknown>): Promise<void> {
+const log: Log = (level, event, message) => logger[level](event, message);
+
+/**
+ * Runs `job` every `intervalMs`. A job that returns `{ complete: false }` did not do its job (a
+ * supplier was unreachable, its lock was busy) and does not count as a success for the staleness
+ * gauge; it -- like a job that threw -- is retried after INCOMPLETE_RETRY_MS rather than a full
+ * interval, so one lost lock race at boot does not mean a day without a price check.
+ *
+ * Only the poll loop writes the container heartbeat: "healthy" means orders are being settled, and
+ * a daily retention run succeeding must not paper over a poll loop that has been failing for hours.
+ */
+async function loop(
+  name: string,
+  intervalMs: number,
+  job: () => Promise<unknown>,
+  options: { heartbeat?: boolean } = {},
+): Promise<void> {
   while (running) {
     const startedAt = Date.now();
+    let nextIn = intervalMs;
     try {
       const result = await job();
       logger.debug({ job: name, result, ms: Date.now() - startedAt }, 'job finished');
-      await beat().catch((error: unknown) => logger.warn({ err: error }, 'heartbeat not written'));
+      const incomplete =
+        result !== null && typeof result === 'object' && (result as { complete?: unknown }).complete === false;
+      if (!incomplete) metrics.jobLastSuccess.set({ job: name }, Date.now() / 1000);
+      nextIn = incomplete ? Math.min(intervalMs, INCOMPLETE_RETRY_MS) : intervalMs;
+      if (options.heartbeat === true) {
+        await beat().catch((error: unknown) => logger.warn({ err: error }, 'heartbeat not written'));
+      }
     } catch (error) {
       // A failing job must not kill the loop: the next tick is a free retry, and a crashed worker
       // silently stops settling orders that are still awaiting an answer.
       logger.error({ job: name, err: error }, 'job failed');
+      nextIn = Math.min(intervalMs, INCOMPLETE_RETRY_MS);
     }
-    await sleep(Math.max(1_000, intervalMs - (Date.now() - startedAt)));
+    await sleep(Math.max(1_000, nextIn - (Date.now() - startedAt)));
   }
 }
 
@@ -136,19 +206,67 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   });
 }
 
+if (WORKER_METRICS_PORT > 0) {
+  createServer((req, res) => {
+    if (req.url !== '/metrics') {
+      res.writeHead(404).end();
+      return;
+    }
+    metrics.render().then(
+      (body) => res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }).end(body),
+      () => res.writeHead(500).end(),
+    );
+  })
+    .on('error', (error) => logger.error({ err: error }, 'worker metrics listener failed'))
+    .listen(WORKER_METRICS_PORT);
+}
+
 logger.info(
-  { intervals: { POLL_INTERVAL_MS }, providers: providers.map((p) => p.id) },
+  {
+    intervals: {
+      POLL_INTERVAL_MS,
+      BALANCE_RECONCILE_INTERVAL_MS,
+      CATALOGUE_DRIFT_INTERVAL_MS,
+      RETENTION_INTERVAL_MS,
+    },
+    retention,
+    metrics_port: WORKER_METRICS_PORT,
+    providers: providers.map((p) => p.id),
+  },
   'worker started',
 );
 
 await Promise.all([
-  loop('poll-orders', POLL_INTERVAL_MS, () =>
-    pollOrders({
-      repos,
-      providers,
-      tacDirectory,
-      metrics,
-      log: (event, message) => logger.info(event, message),
-    }),
+  loop(
+    'poll-orders',
+    POLL_INTERVAL_MS,
+    () =>
+      pollOrders({
+        repos,
+        providers,
+        tacDirectory,
+        metrics,
+        log: (event, message) => logger.info(event, message),
+      }),
+    { heartbeat: true },
   ),
+  loop('reconcile-balance', BALANCE_RECONCILE_INTERVAL_MS, async () => {
+    const outcome = await reconcileBalances({ providers, repos, metrics, log });
+    // The balance fell faster than our books: the likeliest cause is a reprice, so check prices
+    // NOW rather than at the next daily run -- a disabled service stops the overspend, an alert
+    // alone does not.
+    if (outcome.results.some((r) => r.status === 'drift')) {
+      const drift = await detectCatalogueDrift({ providers, repos, metrics, log });
+      logger.info({ job: 'catalogue-drift', trigger: 'balance-drift', findings: drift.findings.length }, 'price check after balance drift');
+    }
+    return outcome;
+  }),
+  loop('catalogue-drift', CATALOGUE_DRIFT_INTERVAL_MS, () =>
+    detectCatalogueDrift({ providers, repos, metrics, log }),
+  ),
+  loop('retention', RETENTION_INTERVAL_MS, async () => {
+    const summary = await runRetention(pool, retention);
+    logger.info({ job: 'retention', ...summary }, 'retention run finished');
+    return summary;
+  }),
 ]);

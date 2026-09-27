@@ -15,7 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:sentinel": "vitest run apps/api/test/sentinel.test.ts",
-    "test:integration": "echo 'Integration lane: start Postgres, apply db/migrations, then run the smoke path. See README.' && exit 0",
+    "test:integration": "bash scripts/test-integration.sh",
     "api:test": "cd bruno && bru run --env Local -r --exclude-tags paid",
     "schema:emit": "npm -w @imei-check/contract run schema:emit",
     "schema:diff": "node scripts/schema-diff.mjs",
@@ -27,7 +27,8 @@
     "seed:dev": "node --env-file-if-exists=.env scripts/seed-dev-tenant.mjs",
     "seed:service-tenant": "node --env-file-if-exists=.env scripts/seed-service-tenant.mjs",
     "seed:admin-key": "node --env-file-if-exists=.env scripts/seed-admin-key.mjs",
-    "imei:reveal": "node --env-file-if-exists=.env scripts/imei-reveal.mjs"
+    "imei:reveal": "node --env-file-if-exists=.env scripts/imei-reveal.mjs",
+    "service:override": "node --env-file-if-exists=.env scripts/service-override.mjs"
   },
   "devDependencies": {
     "@types/js-yaml": "4.0.9",

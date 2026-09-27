@@ -133,6 +133,9 @@ export async function makePaidApp(options: {
    */
   deepWaitMs?: number;
   pollIntervalMs?: number;
+  /** Real Postgres repositories (pg integration lane). Default: a fresh in-memory set. */
+  repos?: Repositories;
+  dailySpendUsd?: number;
 } = {}): Promise<PaidHarness> {
   const lines: string[] = [];
   // The REAL logger, tripwire included -- a plain pino here would let an IMEI leak through a test.
@@ -151,7 +154,7 @@ export async function makePaidApp(options: {
     'test attribution',
   );
 
-  const repos = new MemoryRepositories();
+  const repos = options.repos ?? new MemoryRepositories();
   await repos.tenants.create({
     id: 'ten_test',
     name: 'Test tenant',
@@ -191,6 +194,7 @@ export async function makePaidApp(options: {
     cipher: TEST_CIPHER,
     deepWaitMs: options.deepWaitMs ?? 1_000,
     pollIntervalMs: options.pollIntervalMs ?? 250,
+    ...(options.dailySpendUsd !== undefined ? { dailySpendUsd: options.dailySpendUsd } : {}),
   });
 
   const app = await buildApp({ logger, tacDirectory, services });

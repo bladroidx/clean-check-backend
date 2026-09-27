@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Coverage } from '@imei-check/contract';
 import { MemoryRepositories } from '../src/db/memory.js';
 import { FieldCache, cacheKey } from '../src/cache/store.js';
-import { expiryFor, ttlFor } from '../src/cache/ttl.js';
+import { MAX_CACHE_SECONDS, expiryFor, ttlFor } from '../src/cache/ttl.js';
 
 /**
  * Cache TTLs, crossed from both sides.
@@ -31,11 +31,12 @@ describe('the TTL table', () => {
     expect(ttlFor('lock.activation.status', 'on').seconds).toBe(900);
   });
 
-  it('treats immutable facts as permanent', () => {
+  it('keeps immutable facts for the whole retention window, and no longer', () => {
     expect(ttlFor('warranty.purchase_date', 'x').seconds).toBe(Infinity);
     expect(ttlFor('identity.model', 'x').seconds).toBe(Infinity);
     const expiry = expiryFor('warranty.purchase_date', 'x', T0);
-    expect(expiry?.getUTCFullYear()).toBe(T0.getUTCFullYear() + 100);
+    // Capped at the checks retention window: a per-device row must not outlive the check it came from.
+    expect(expiry?.getTime()).toBe(T0.getTime() + MAX_CACHE_SECONDS * 1000);
   });
 
   it('states an argument beside every rule', () => {

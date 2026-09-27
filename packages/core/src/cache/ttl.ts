@@ -98,16 +98,18 @@ export function ttlFor(field: CanonicalField, value: string): TtlRule {
   return table[value] ?? table['__default'] ?? FALLBACK;
 }
 
-/** `Infinity` is not a timestamp Postgres will take. Pinned far enough out to mean "until import". */
-const FAR_FUTURE_YEARS = 100;
+/**
+ * No per-device cache row outlives the `checks` retention window (docs/privacy.md).
+ *
+ * Every cache key is `HMAC(SERVER_PEPPER, imei):field`, so a row is a record that THIS device was
+ * checked here. An "until import" (`Infinity`) row pinned 100 years out was a permanent lookup log
+ * that survived every check it came from. The cost is re-buying an immutable fact (a model, a
+ * purchase date) at most once per window per device -- cheap next to keeping it forever.
+ */
+export const MAX_CACHE_SECONDS = 180 * DAY;
 
 export function expiryFor(field: CanonicalField, value: string, from: Date): Date | undefined {
   const rule = ttlFor(field, value);
   if (rule.seconds === 0) return undefined;
-  if (rule.seconds === Infinity) {
-    const far = new Date(from);
-    far.setUTCFullYear(far.getUTCFullYear() + FAR_FUTURE_YEARS);
-    return far;
-  }
-  return new Date(from.getTime() + rule.seconds * 1000);
+  return new Date(from.getTime() + Math.min(rule.seconds, MAX_CACHE_SECONDS) * 1000);
 }

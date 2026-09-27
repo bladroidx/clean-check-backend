@@ -104,6 +104,7 @@ export function buildServices(options: BuildServicesOptions): AppServices {
         lockWaitMs,
         dailySpendUsd,
         costSince: (id, since) => options.repos.providerCalls.costSinceForProvider(id, since),
+        isDisabled: (id, serviceId) => options.repos.serviceOverrides.isDisabled(id, serviceId),
         ...(options.now !== undefined ? { now: options.now } : {}),
       }),
   );

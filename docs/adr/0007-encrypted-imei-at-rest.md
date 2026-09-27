@@ -71,6 +71,9 @@ stored, so a caller who types the device number into the reason field does not u
 ### Retention
 
 The ciphertext lives and dies with its `checks` partition; dropping the partition deletes it.
+(Amended 2026-09-27: until then `checks` had only a DEFAULT partition and nothing dropped it, so
+this sentence was not true. Monthly partitions and the worker's retention job —
+`packages/core/src/db/retention.ts`, `CHECKS_RETENTION_DAYS`, default 180 — now make it so.)
 DSAR erasure: null `imei_encrypted` for rows matching the hash.
 
 ## Alternatives rejected

@@ -30,11 +30,16 @@ function ranked(a: { service: CatalogueService }, b: { service: CatalogueService
 }
 
 /** Failure reasons that never count against a supplier's breaker. See the comment in `runCall`. */
-const OUR_OWN_REFUSALS: ReadonlySet<FailureReason> = new Set(['rate_limited', 'spend_cap_reached']);
+const OUR_OWN_REFUSALS: ReadonlySet<FailureReason> = new Set([
+  'rate_limited',
+  'spend_cap_reached',
+  'service_disabled',
+]);
 
 /** Reasons that by construction are decided before any request is sent. */
 const NEVER_SENT_REASONS: ReadonlySet<FailureReason> = new Set([
   'spend_cap_reached',
+  'service_disabled',
   'circuit_open',
   'no_provider_configured',
 ]);
@@ -309,10 +314,11 @@ export class Router {
       );
       const finishedAt = now();
 
-      // Three kinds of `failed` say nothing about the supplier's health, so they never count
+      // Four kinds of `failed` say nothing about the supplier's health, so they never count
       // toward opening its circuit:
       //
       // - `spend_cap_reached`: our own daily budget refused the call.
+      // - `service_disabled`: the drift job switched this service off after a supplier reprice.
       // - `rate_limited`: our own cross-process lock was busy -- AND, deliberately, the same
       //   reason from the supplier side (an HTTP 429, or imei24's "APIKEY is working in other
       //   session"). Both mean "one job at a time", i.e. contention with our OWN other process,

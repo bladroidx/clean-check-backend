@@ -23,6 +23,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run boundaries
       - run: npm test
+      # Real Postgres (docker): migrations, retention partitions, and the deep path end to end.
+      - run: npm run test:integration
 
   # Coolify builds on the ARM host itself; this catches a broken image before it gets there.
   image:

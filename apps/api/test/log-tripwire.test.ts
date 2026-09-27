@@ -141,3 +141,18 @@ describe('res serializer', () => {
     expect(serializers.res(reply)).toEqual({ statusCode: 200 });
   });
 });
+
+describe('pg error serialization', () => {
+  it('drops the fields where Postgres echoes row data', () => {
+    const error = Object.assign(new Error('no partition of relation "checks" found for row'), {
+      code: '23514',
+      table: 'checks',
+      detail: 'Failing row contains (chk_1, t1, h_abc, 35310411, 35•••••••••••78, s_abc, \\x00ff).',
+      where: 'SQL statement "INSERT INTO checks_p202609 ..."',
+    });
+    const out = serializers.err(error) as Record<string, unknown>;
+    expect(out).toMatchObject({ message: error.message, code: '23514', table: 'checks' });
+    expect(out).not.toHaveProperty('detail');
+    expect(out).not.toHaveProperty('where');
+  });
+});
