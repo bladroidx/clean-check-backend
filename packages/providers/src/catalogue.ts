@@ -11,7 +11,9 @@ import type { CatalogueService } from './types.js';
  * name. Those names read `"IPHONE GSX FULL INFO (FAST) [24H]"` and change for marketing reasons;
  * routing money on a regex over them is how a price change becomes a negative margin.
  *
- * The catalogue duplicates upstream state and therefore drifts. `drift.ts` reconciles it nightly.
+ * The catalogue duplicates upstream state and therefore drifts. The worker's catalogue drift job
+ * (apps/worker/src/jobs/catalogue-drift.ts) compares it with the live price list daily and switches
+ * off any service that got dearer, because the spend cap sums THESE prices.
  */
 
 interface RawService {

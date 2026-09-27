@@ -1,6 +1,8 @@
 import pg from 'pg';
 import type {
   ApiKeyRecord,
+  BalanceSnapshot,
+  BalanceSnapshotRepo,
   ApiKeyRepo,
   CacheRepo,
   CacheRow,
@@ -17,6 +19,8 @@ import type {
   ProviderCallRow,
   ProviderLock,
   Repositories,
+  ServiceOverride,
+  ServiceOverrideRepo,
   StoredSection,
   Tenant,
   TenantRepo,
@@ -83,7 +87,7 @@ export function createPool(databaseUrl: string, options: PoolOptions = {}): pg.P
  * it honest is a test's job rather than a comment's -- `schema-version.test.ts` fails the moment a
  * migration is added without bumping it.
  */
-export const REQUIRED_SCHEMA_VERSION = '20260925000002';
+export const REQUIRED_SCHEMA_VERSION = '20260927000002';
 
 export interface DatabaseReadiness {
   readonly reachable: boolean;
@@ -153,6 +157,8 @@ export class PgRepositories implements Repositories {
   readonly idempotency: IdempotencyRepo;
   readonly locks: ProviderLock;
   readonly reveals: ImeiRevealRepo;
+  readonly balances: BalanceSnapshotRepo;
+  readonly serviceOverrides: ServiceOverrideRepo;
 
   constructor(private readonly pool: pg.Pool) {
     this.tenants = new PgTenantRepo(pool);
@@ -164,6 +170,8 @@ export class PgRepositories implements Repositories {
     this.idempotency = new PgIdempotencyRepo(pool);
     this.locks = new PgProviderLock(pool);
     this.reveals = new PgImeiRevealRepo(pool);
+    this.balances = new PgBalanceSnapshotRepo(pool);
+    this.serviceOverrides = new PgServiceOverrideRepo(pool);
   }
 
   async close(): Promise<void> {
@@ -460,6 +468,93 @@ class PgProviderCallRepo implements ProviderCallRepo {
       [providerId, since],
     );
     return Number(rows[0]?.total ?? 0);
+  }
+  async costBetweenForProvider(providerId: string, from: Date, to: Date): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT COALESCE(SUM(provider_cost_usd),0) AS total FROM provider_calls
+       WHERE provider_id = $1 AND started_at >= $2 AND started_at < $3`,
+      [providerId, from, to],
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+}
+
+class PgBalanceSnapshotRepo implements BalanceSnapshotRepo {
+  constructor(private readonly pool: pg.Pool) {}
+  async record(snapshot: BalanceSnapshot): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO provider_balance_snapshots (provider_id, balance_usd, taken_at) VALUES ($1,$2,$3)',
+      [snapshot.providerId, snapshot.balanceUsd, snapshot.takenAt],
+    );
+  }
+  async latest(providerId: string): Promise<BalanceSnapshot | undefined> {
+    const { rows } = await this.pool.query<{ provider_id: string; balance_usd: string; taken_at: Date }>(
+      `SELECT provider_id, balance_usd, taken_at FROM provider_balance_snapshots
+       WHERE provider_id = $1 ORDER BY taken_at DESC LIMIT 1`,
+      [providerId],
+    );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return { providerId: row.provider_id, balanceUsd: Number(row.balance_usd), takenAt: row.taken_at };
+  }
+}
+
+class PgServiceOverrideRepo implements ServiceOverrideRepo {
+  constructor(private readonly pool: pg.Pool) {}
+  async disable(override: ServiceOverride): Promise<void> {
+    // detected_at is deliberately NOT updated on conflict: the first detection is when the books
+    // started being wrong, and that is the number an operator needs.
+    await this.pool.query(
+      `INSERT INTO provider_service_overrides
+         (provider_id, service_id, reason, catalogue_price_usd, live_price_usd, detected_at)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (provider_id, service_id) DO UPDATE SET
+         reason = EXCLUDED.reason, catalogue_price_usd = EXCLUDED.catalogue_price_usd,
+         live_price_usd = EXCLUDED.live_price_usd, last_seen_at = now()`,
+      [
+        override.providerId,
+        override.serviceId,
+        override.reason,
+        override.cataloguePriceUsd,
+        override.livePriceUsd ?? null,
+        override.detectedAt,
+      ],
+    );
+  }
+  async isDisabled(providerId: string, serviceId: string): Promise<boolean> {
+    const { rows } = await this.pool.query(
+      'SELECT 1 FROM provider_service_overrides WHERE provider_id = $1 AND service_id = $2',
+      [providerId, serviceId],
+    );
+    return rows.length > 0;
+  }
+  async list(): Promise<readonly ServiceOverride[]> {
+    const { rows } = await this.pool.query<{
+      provider_id: string;
+      service_id: string;
+      reason: ServiceOverride['reason'];
+      catalogue_price_usd: string;
+      live_price_usd: string | null;
+      detected_at: Date;
+    }>(
+      `SELECT provider_id, service_id, reason, catalogue_price_usd, live_price_usd, detected_at
+       FROM provider_service_overrides ORDER BY provider_id, service_id`,
+    );
+    return rows.map((row) => ({
+      providerId: row.provider_id,
+      serviceId: row.service_id,
+      reason: row.reason,
+      cataloguePriceUsd: Number(row.catalogue_price_usd),
+      livePriceUsd: row.live_price_usd === null ? undefined : Number(row.live_price_usd),
+      detectedAt: row.detected_at,
+    }));
+  }
+  async clear(providerId: string, serviceId: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM provider_service_overrides WHERE provider_id = $1 AND service_id = $2',
+      [providerId, serviceId],
+    );
+    return (rowCount ?? 0) > 0;
   }
 }
 

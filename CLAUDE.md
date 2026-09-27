@@ -65,6 +65,16 @@ open circuit only. If provider A says "blacklisted", do not shop for one who say
   do not use it for server keys.
 - The process refuses to boot if `SERVER_PEPPER` is under 32 bytes, or if `IMEI_ENCRYPTION_KEYS` is
   missing or malformed once `DATABASE_URL` is set.
+- **Retention is real, not a comment.** `checks` and `provider_calls` have monthly UTC range
+  partitions; the worker's daily retention job (`packages/core/src/db/retention.ts`) drops months
+  wholly older than `CHECKS_RETENTION_DAYS` (default 180) / `PROVIDER_CALLS_RETENTION_DAYS`
+  (default 400), trims the straddling month by DELETE, and age-deletes the unpartitioned tables. A
+  monthly partition is only ever created through the SQL function `imei_ensure_month_partition`.
+  The worker refuses to boot on a window outside 30–365 / 30–3650 days. No cache row outlives 180
+  days (`MAX_CACHE_SECONDS`): every cache key is a per-device hash. The DSAR erasure SQL lives in
+  `docs/privacy.md` and a pg test executes it verbatim — keep them together.
+- The guarded logger (IMEI tripwire + pg-error scrubbing) lives in `packages/core/src/log.ts` and is
+  used by the API **and** the worker. Never log through a bare `pino()`.
 
 ## Money
 
@@ -85,6 +95,13 @@ What still matters even with no billing:
 - imei24 (the one supplier wired up) has its own real-money guard independent of billing:
   `IMEI24_DAILY_SPEND_USD` (default `10`) caps daily spend; past it a section is
   `unavailable(spend_cap_reached)`, never a silent overspend.
+- **The cap sums catalogue prices, so the catalogue must be true.** The worker's
+  `catalogue-drift` job reads imei24's live `imeiservicelist` daily and switches off (in
+  `provider_service_overrides`, checked by `GuardedProvider` before every purchase) any service
+  that got dearer or vanished; only a human lifts it (`npm run service:override -- clear …`) after
+  repricing the YAML. `reconcile-balance` reads the real `accountinfo` balance hourly and logs an
+  error + bumps `imei_provider_balance_drift_total` when it falls faster than recorded spend. Both
+  are on the worker's internal `/metrics` (port 9464).
 
 ## Routes
 
@@ -111,7 +128,8 @@ construct a `detail` that never passed through the transport's scrubber.
 
 ## Commands
 
-`npm test` · `npm run typecheck` · `npm run boundaries` · `/quality` for the full gate · `/leaks`
+`npm test` · `npm run typecheck` · `npm run boundaries` · `npm run test:integration` (real
+Postgres in Docker: migrations, retention, the deep path over a real port) · `/quality` for the full gate · `/leaks`
 before any merge that touches logging, persistence or a provider. `npm run seed:admin-key` mints
 the `imei:reveal`-only key; `npm run imei:reveal -- <check_id> --reason "..."` reveals from a
 trusted host (same 10–500 char reason bound as the HTTP route). imei24's brand-specific services

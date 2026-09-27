@@ -62,3 +62,23 @@ test('references are unique within a second and round-trip', () => {
   assert.ok(Math.abs(parseReference(a, now + 5_000).ageMs - 5_000) <= 1_000);
   assert.equal(reply(form({ action: 'getimeiorder', id: 'garbage' }), opts()).body, '{"ERROR":[{"MESSAGE":"Order not found"}]}');
 });
+
+test('accountinfo reports the balance, and an accepted placement debits the live price', async () => {
+  const { newAccount } = await import('../server.mjs');
+  const account = newAccount({ balance: 10 });
+  const balance = () =>
+    Number(JSON.parse(reply(form({ action: 'accountinfo' }), { ...opts(), account }).body).SUCCESS[0].AccountInfo.credit);
+  assert.equal(balance(), 10);
+  reply(form({ action: 'placeimeiorder', imei: imeiFor('0'), services: '486' }), { ...opts(), account });
+  assert.equal(balance(), 9.9);
+  reply(form({ action: 'placeimeiorder', imei: imeiFor('3'), services: '486' }), { ...opts(), account });
+  assert.equal(balance(), 9.9, 'a busy refusal is not charged');
+});
+
+test('imeiservicelist serves the catalogue prices, multiplied when repriced', async () => {
+  const { newAccount } = await import('../server.mjs');
+  const credit = (account) =>
+    JSON.parse(reply(form({ action: 'imeiservicelist' }), { ...opts(), account }).body).SUCCESS[0].LIST.All.SERVICES['486'].CREDIT;
+  assert.equal(credit(newAccount()), '0.10');
+  assert.equal(credit(newAccount({ priceMultiplier: 10 })), '1.00');
+});

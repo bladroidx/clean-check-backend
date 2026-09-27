@@ -137,6 +137,34 @@ export class DhruLegacyProvider implements Provider {
     }
   }
 
+  /**
+   * The live price list (`imeiservicelist`), for the catalogue drift job. Free to call.
+   *
+   * DHRU nests it as `SUCCESS[0].LIST.<group>.SERVICES.<id> = {SERVICEID, CREDIT, ...}`, and
+   * sellers vary the nesting, so this walks the tree for any object carrying both a SERVICEID and
+   * a CREDIT rather than trusting one path. A body with no such object at all is `undefined` --
+   * "we could not read the list" -- never an empty map, because an empty map would read as
+   * "every service vanished" and switch the whole catalogue off on a format change.
+   */
+  async servicePrices(signal: AbortSignal): Promise<ReadonlyMap<string, number> | undefined> {
+    try {
+      const result = await postForm(
+        `${this.config.baseUrl}/api/index.php`,
+        {
+          username: this.config.username,
+          apiaccesskey: this.config.apiAccessKey,
+          action: 'imeiservicelist',
+          format: 'json',
+          requestformat: 'json',
+        },
+        signal,
+      );
+      return parseServicePrices(result.body);
+    } catch {
+      return undefined;
+    }
+  }
+
   /** The one place a legacy body becomes an outcome. Kept separate so fixtures can drive it. */
   interpret(body: string, service: CatalogueService): ProviderOutcome {
     let envelope: DhruEnvelope;
@@ -233,6 +261,34 @@ export class DhruLegacyProvider implements Provider {
       providerCostUsd: service.costUsd,
     };
   }
+}
+
+/** Exported for fixtures. See `DhruLegacyProvider.servicePrices`. */
+export function parseServicePrices(body: string): ReadonlyMap<string, number> | undefined {
+  let envelope: DhruEnvelope;
+  try {
+    envelope = parseEnvelope(body);
+  } catch {
+    return undefined;
+  }
+  if (envelope.SUCCESS === undefined) return undefined;
+  const prices = new Map<string, number>();
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 8 || node === null || typeof node !== 'object') return;
+    const record = node as Record<string, unknown>;
+    const id = record['SERVICEID'] ?? record['serviceid'];
+    const credit = record['CREDIT'] ?? record['credit'];
+    if (id !== undefined && credit !== undefined) {
+      // Strict: `parseFloat("0,75")` is 0 and would read a price RISE as a fall. Anything that is
+      // not a plain number is left out, so that service is disabled as missing -- fails closed.
+      const price = typeof credit === 'number' ? credit : typeof credit === 'string' && credit.trim() !== '' ? Number(credit.trim()) : Number.NaN;
+      if (Number.isFinite(price) && price >= 0) prices.set(String(id), price);
+      return;
+    }
+    for (const child of Object.values(record)) walk(child, depth + 1);
+  };
+  walk(envelope.SUCCESS, 0);
+  return prices.size > 0 ? prices : undefined;
 }
 
 function parseEnvelope(body: string): DhruEnvelope {

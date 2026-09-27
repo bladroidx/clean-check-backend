@@ -70,6 +70,64 @@ export class Metrics {
     registers: [this.registry],
   });
 
+  /**
+   * The supplier's REAL prepaid balance, from `accountinfo`. Everything else we record about spend
+   * is priced from our own catalogue; this is the one number the supplier controls.
+   */
+  readonly providerBalanceUsd = new Gauge({
+    name: 'imei_provider_balance_usd',
+    help: "Supplier's real prepaid balance at the last reconcile.",
+    labelNames: ['provider_id'] as const,
+    registers: [this.registry],
+  });
+
+  /** Days of balance left at the trailing 3-day burn rate. Alert well before it reaches 0. */
+  readonly providerRunwayDays = new Gauge({
+    name: 'imei_provider_balance_runway_days',
+    help: 'Balance divided by the trailing 3-day average daily recorded spend.',
+    labelNames: ['provider_id'] as const,
+    registers: [this.registry],
+  });
+
+  /**
+   * The balance fell by more than our books say we spent: a silent reprice, or spend we did not
+   * record. Every increment is an alert.
+   */
+  readonly balanceDrift = new Counter({
+    name: 'imei_provider_balance_drift_total',
+    help: 'Reconcile windows where the real balance fell more than recorded spend (+ tolerance).',
+    labelNames: ['provider_id'] as const,
+    registers: [this.registry],
+  });
+
+  /** A catalogue service's live price no longer matches what we checked in. */
+  readonly catalogueDrift = new Counter({
+    name: 'imei_catalogue_drift_total',
+    help: 'Services whose live supplier price differs from the catalogue, by direction.',
+    labelNames: ['provider_id', 'service_id', 'direction'] as const,
+    registers: [this.registry],
+  });
+
+  /** Services currently switched off by the drift job. Non-zero means someone must reprice. */
+  readonly servicesDisabled = new Gauge({
+    name: 'imei_services_disabled',
+    help: 'Catalogue services switched off by the drift job, awaiting a human reprice.',
+    labelNames: ['provider_id'] as const,
+    registers: [this.registry],
+  });
+
+  /**
+   * Unix seconds of each worker job's last SUCCESSFUL run. The staleness alert is
+   * `time() - imei_job_last_success_timestamp_seconds > 2 * interval`: a job that silently stopped
+   * is the failure none of the counters above can show.
+   */
+  readonly jobLastSuccess = new Gauge({
+    name: 'imei_job_last_success_timestamp_seconds',
+    help: 'Unix time of the last successful run of each worker job.',
+    labelNames: ['job'] as const,
+    registers: [this.registry],
+  });
+
   constructor(collectDefaults = true) {
     if (collectDefaults) collectDefaultMetrics({ register: this.registry });
   }

@@ -77,7 +77,13 @@ export type FailureReason =
   | 'rate_limited'
   | 'circuit_open'
   | 'malformed_response'
-  | 'spend_cap_reached';
+  | 'spend_cap_reached'
+  /**
+   * The drift job saw the supplier's live price differ from our catalogue (or the service vanish
+   * from their list) and switched this service off until someone reprices it. Our own refusal:
+   * nothing is sent, and it says nothing about the supplier's health.
+   */
+  | 'service_disabled';
 
 export interface LexiconMiss {
   readonly field: CanonicalField;
@@ -190,4 +196,10 @@ export interface Provider {
   parseWebhook?(input: WebhookInput): Promise<ParsedWebhook>;
   /** Balance and reachability, for reconciliation and /readyz-adjacent dashboards. */
   health?(signal: AbortSignal): Promise<{ balanceUsd?: number; reachable: boolean }>;
+  /**
+   * The supplier's LIVE price list, service id -> price in account currency (USD for imei24).
+   * `undefined` when the list could not be read or parsed -- which is not the same as "empty", and
+   * the drift job must never read it as "every service vanished".
+   */
+  servicePrices?(signal: AbortSignal): Promise<ReadonlyMap<string, number> | undefined>;
 }

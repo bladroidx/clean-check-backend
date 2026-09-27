@@ -59,6 +59,9 @@ services:
       IMEI24_USERNAME: ${IMEI24_USERNAME:-}
       IMEI24_API_KEY: ${IMEI24_API_KEY:-}
       IMEI24_DAILY_SPEND_USD: ${IMEI24_DAILY_SPEND_USD:-10}
+      # Worker only. Retention windows (days, >= 30 or the worker refuses to boot) -- docs/privacy.md.
+      CHECKS_RETENTION_DAYS: ${CHECKS_RETENTION_DAYS:-180}
+      PROVIDER_CALLS_RETENTION_DAYS: ${PROVIDER_CALLS_RETENTION_DAYS:-400}
       DEEP_CHECK_WAIT_MS: ${DEEP_CHECK_WAIT_MS:-10000}
     expose: ['3000']
     networks:
@@ -78,6 +81,9 @@ services:
     environment: *app_env
     # The image's HEALTHCHECK probes the api's port, which the worker does not serve. Healthy means
     # a poll tick succeeded in the last 5 minutes (apps/worker/src/heartbeat.ts).
+    # It serves /metrics on 9464 inside the compose network only (never published): the balance,
+    # drift and job-staleness signals live there (WORKER_METRICS_PORT=0 turns it off).
+    expose: ['9464']
     healthcheck:
       test: ['CMD', 'node', 'apps/worker/dist/healthcheck.js']
       interval: 30s

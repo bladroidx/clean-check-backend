@@ -42,3 +42,15 @@ comes back `inconclusive` -- the parsing rule in `CLAUDE.md` working, not a bug.
 The local stack builds and runs it; nothing to do by hand. On its own:
 
     node --test tools/fake-imei24/test    # the fake's own tests
+
+## Balance and prices
+
+`accountinfo` reports a prepaid balance that starts at `FAKE_IMEI24_BALANCE` (default 100) and is
+debited the *live* price of every accepted placement (busy and not-found are free; a timeout is
+charged, as a real supplier may). `imeiservicelist` serves the catalogue prices multiplied by
+`FAKE_IMEI24_PRICE_MULTIPLIER` (default 1).
+
+Set the multiplier to `10` to play "imei24 silently repriced": the worker's balance reconcile logs
+an error once the balance falls faster than recorded spend, and the next catalogue drift run
+disables every service (`npm run service:override -- list`), after which deep checks come back
+`unavailable(provider_not_configured)` without placing an order.

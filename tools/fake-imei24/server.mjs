@@ -33,13 +33,34 @@ export const SCENARIOS = {
   0: { name: 'instant blacklisted', place: 'imei24/blacklist-blacklisted.json' },
   1: { name: 'async fast, then blacklisted', place: 'imei24/placement-order-received.json', poll: 'imei24/blacklist-blacklisted.json' },
   2: { name: 'instant "Clean" wording', place: 'imei24/blacklist-clean-wording.json' },
-  3: { name: 'supplier busy', place: 'imei24/busy.json' },
+  3: { name: 'supplier busy', place: 'imei24/busy.json', free: true },
   4: { name: 'timeout', sleepMs: TIMEOUT_SCENARIO_SLEEP_MS, place: 'imei24/busy.json' },
-  5: { name: 'not found', place: 'imei24/not-found.json' },
+  5: { name: 'not found', place: 'imei24/not-found.json', free: true },
   6: { name: 'async slow, then blacklisted', place: 'imei24/placement-order-received.json', poll: 'imei24/blacklist-blacklisted.json' },
   7: { name: 'ambiguous "Status" label', place: 'imei24/ambiguous-status-label.json' },
   8: { name: 'identity only, no blacklist field', place: 'imei24/instant-model.json' },
   9: { name: 'HTTP 429', status: 429 },
+};
+
+/**
+ * The live price list, mirroring packages/providers/catalogue/imei24.yaml. Duplicated on purpose:
+ * this directory is outside the workspaces and must not import the service. Multiplied by
+ * FAKE_IMEI24_PRICE_MULTIPLIER, so `=10` plays "imei24 silently repriced everything": the drift job
+ * should disable every service and the balance reconcile should alert.
+ */
+export const PRICES = {
+  486: 0.1, 690: 0.12, 678: 1.5, 783: 0.1, 487: 0.1,
+  428: 0.1, 437: 0.1, 429: 0.1, 467: 0.1, 485: 0.1, 707: 0.1, 709: 0.1, 488: 0.1,
+};
+
+/** Prepaid account state. A placement that is accepted debits the LIVE price, as imei24 does. */
+export function newAccount({ balance = 100, priceMultiplier = 1 } = {}) {
+  return { balance, priceMultiplier };
+}
+
+const livePrice = (account, serviceId) => {
+  const base = PRICES[serviceId];
+  return base === undefined ? undefined : Math.round(base * account.priceMultiplier * 10_000) / 10_000;
 };
 
 const PENDING_FIXTURE = 'dhru/legacy-pending.json';
@@ -77,7 +98,7 @@ export function parseReference(reference, now = Date.now()) {
 }
 
 /** Decides a reply. Pure apart from the fixture reader, so the tests drive it directly. */
-export function reply(form, { readFixture, now = Date.now(), username, apiKey }) {
+export function reply(form, { readFixture, now = Date.now(), username, apiKey, account = newAccount() }) {
   const json = (body, status = 200) => ({ status, body });
   const error = (message) => json(`{"ERROR":[{"MESSAGE":"${message}"}]}`);
 
@@ -88,15 +109,32 @@ export function reply(form, { readFixture, now = Date.now(), username, apiKey })
   switch (form.get('action')) {
     case 'accountinfo':
       return {
-        ...json('{"SUCCESS":[{"MESSAGE":"Your Account Info","AccountInfo":{"credit":"100.00","currency":"USD"}}]}'),
-        log: 'accountinfo',
+        ...json(
+          JSON.stringify({
+            SUCCESS: [{ MESSAGE: 'Your Account Info', AccountInfo: { credit: account.balance.toFixed(2), currency: 'USD' } }],
+          }),
+        ),
+        log: `accountinfo balance=${account.balance.toFixed(2)}`,
       };
+
+    case 'imeiservicelist': {
+      const services = Object.fromEntries(
+        Object.keys(PRICES).map((id) => [id, { SERVICEID: Number(id), SERVICENAME: `service ${id}`, CREDIT: livePrice(account, id).toFixed(2) }]),
+      );
+      return {
+        ...json(JSON.stringify({ SUCCESS: [{ MESSAGE: 'IMEI Service List', LIST: { All: { GROUPNAME: 'All', SERVICES: services } } }] })),
+        log: `imeiservicelist x${account.priceMultiplier}`,
+      };
+    }
 
     case 'placeimeiorder': {
       const scenario = scenarioOf(form.get('imei'));
       if (scenario === undefined) return { ...error('Invalid IMEI'), log: 'place: invalid imei' };
       const s = SCENARIOS[scenario];
       if (s.status !== undefined) return { status: s.status, body: '', log: `place scenario=${scenario} -> HTTP ${s.status}` };
+      // Busy and "not found" are refusals (`free`); everything else is debited, timeouts included --
+      // the supplier charging for a reply we never read is exactly the case the books must survive.
+      if (s.free !== true) account.balance -= livePrice(account, form.get('services')) ?? 0;
       if (s.poll === undefined) {
         return { ...json(readFixture(s.place)), sleepMs: s.sleepMs, log: `place scenario=${scenario} (${s.name})` };
       }
@@ -139,6 +177,10 @@ function start() {
     console.error('FAKE_IMEI24_USERNAME and FAKE_IMEI24_API_KEY are required');
     process.exit(1);
   }
+  const account = newAccount({
+    balance: Number(process.env.FAKE_IMEI24_BALANCE ?? 100),
+    priceMultiplier: Number(process.env.FAKE_IMEI24_PRICE_MULTIPLIER ?? 1),
+  });
   // Read per request, trimmed of the trailing newline the fixture files end with.
   const readFixture = (name) => readFileSync(join(fixturesDir, name), 'utf8').trimEnd();
 
@@ -155,7 +197,7 @@ function start() {
         return;
       }
       const form = new URLSearchParams(await readBody(request));
-      const result = reply(form, { readFixture, username, apiKey });
+      const result = reply(form, { readFixture, username, apiKey, account });
       console.log(`${new Date().toISOString()} ${result.log}`);
       if (result.sleepMs) await sleep(result.sleepMs);
       // The caller gave up, as the timeout scenario intends.

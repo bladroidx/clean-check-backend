@@ -1,5 +1,7 @@
 import type {
   ApiKeyRecord,
+  BalanceSnapshot,
+  BalanceSnapshotRepo,
   ApiKeyRepo,
   CacheRepo,
   CacheRow,
@@ -16,6 +18,8 @@ import type {
   ProviderCallRow,
   ProviderLock,
   Repositories,
+  ServiceOverride,
+  ServiceOverrideRepo,
   StoredSection,
   Tenant,
   TenantRepo,
@@ -41,6 +45,8 @@ export class MemoryRepositories implements Repositories {
   readonly idempotency = new MemoryIdempotencyRepo();
   readonly locks = new MemoryProviderLock();
   readonly reveals = new MemoryImeiRevealRepo();
+  readonly balances = new MemoryBalanceSnapshotRepo();
+  readonly serviceOverrides = new MemoryServiceOverrideRepo();
 
   async close(): Promise<void> {}
 }
@@ -138,6 +144,51 @@ class MemoryProviderCallRepo implements ProviderCallRepo {
       if (row.providerId === providerId && row.startedAt >= since) total += row.providerCostUsd;
     }
     return total;
+  }
+  async costBetweenForProvider(providerId: string, from: Date, to: Date): Promise<number> {
+    let total = 0;
+    for (const row of this.rows.values()) {
+      if (row.providerId === providerId && row.startedAt >= from && row.startedAt < to) {
+        total += row.providerCostUsd;
+      }
+    }
+    return total;
+  }
+}
+
+class MemoryBalanceSnapshotRepo implements BalanceSnapshotRepo {
+  readonly rows: BalanceSnapshot[] = [];
+  async record(snapshot: BalanceSnapshot): Promise<void> {
+    this.rows.push(snapshot);
+  }
+  async latest(providerId: string): Promise<BalanceSnapshot | undefined> {
+    return this.rows
+      .filter((r) => r.providerId === providerId)
+      .sort((a, b) => b.takenAt.getTime() - a.takenAt.getTime())[0];
+  }
+}
+
+class MemoryServiceOverrideRepo implements ServiceOverrideRepo {
+  private readonly rows = new Map<string, ServiceOverride>();
+  private id(providerId: string, serviceId: string): string {
+    return `${providerId} ${serviceId}`;
+  }
+  async disable(override: ServiceOverride): Promise<void> {
+    const existing = this.rows.get(this.id(override.providerId, override.serviceId));
+    // Keep the FIRST detection time: it is when the books started being wrong.
+    this.rows.set(this.id(override.providerId, override.serviceId), {
+      ...override,
+      detectedAt: existing?.detectedAt ?? override.detectedAt,
+    });
+  }
+  async isDisabled(providerId: string, serviceId: string): Promise<boolean> {
+    return this.rows.has(this.id(providerId, serviceId));
+  }
+  async list(): Promise<readonly ServiceOverride[]> {
+    return [...this.rows.values()];
+  }
+  async clear(providerId: string, serviceId: string): Promise<boolean> {
+    return this.rows.delete(this.id(providerId, serviceId));
   }
 }
 

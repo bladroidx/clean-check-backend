@@ -43,7 +43,11 @@ and we shop for one who says clean, a reseller with an API key simply retries un
 - A single-sourced capability is a business risk, not just a technical one. Two providers per paid
   capability before launch.
 - The catalogue duplicates upstream state and will drift, so a nightly drift job that auto-disables
-  a repriced service is mandatory, not optional.
+  a repriced service is mandatory, not optional. (Implemented 2026-09-27:
+  `apps/worker/src/jobs/catalogue-drift.ts` writes `provider_service_overrides`, which
+  `GuardedProvider` checks before every purchase; `reconcile-balance.ts` compares the real
+  `accountinfo` balance against recorded spend. A human lifts an override with
+  `npm run service:override`.)
 
 ## Enforcement
 

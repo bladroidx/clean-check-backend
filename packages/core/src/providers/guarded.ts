@@ -9,12 +9,15 @@ import type {
 import type { ProviderLock } from '../db/types.js';
 
 /**
- * Wraps a supplier with the two guards imei24 needs and a router cannot express:
+ * Wraps a supplier with the guards imei24 needs and a router cannot express:
  *
  * 1. ONE call at a time per API key, across API and worker processes (imei24: "You can do ONE JOB
  *    in time"). Every call -- place, poll, balance -- holds the lock for one HTTP request only.
  * 2. A daily spend cap on NEW orders. imei24 charges again for every repeat, so a bug or a leaked
  *    service key would otherwise spend without limit. Polling is free and never capped.
+ * 3. No purchase of a service the catalogue drift job has switched off (the supplier's live price
+ *    rose above the one the spend cap sums, or the service left their list). Checked per call
+ *    against the database, so the API and the worker see an override the moment it is written.
  *
  * Both refusals are `failed`, never a field: nothing here can make a section pass.
  */
@@ -23,6 +26,8 @@ export interface GuardOptions {
   readonly lockWaitMs: number;
   readonly dailySpendUsd: number;
   readonly costSince: (providerId: string, since: Date) => Promise<number>;
+  /** The drift job's runtime overrides. Omitted means nothing is ever disabled (tests). */
+  readonly isDisabled?: (providerId: string, serviceId: string) => Promise<boolean>;
   readonly now?: () => Date;
 }
 
@@ -40,6 +45,7 @@ export class GuardedProvider implements Provider {
     signal: AbortSignal,
   ) => Promise<ProviderOutcome>;
   readonly health?: (signal: AbortSignal) => Promise<{ balanceUsd?: number; reachable: boolean }>;
+  readonly servicePrices?: (signal: AbortSignal) => Promise<ReadonlyMap<string, number> | undefined>;
   /** Unlocked: parsing an inbound webhook makes no call to the supplier. Same conditional rule. */
   readonly parseWebhook?: (input: WebhookInput) => Promise<ParsedWebhook>;
 
@@ -69,6 +75,17 @@ export class GuardedProvider implements Provider {
         return result.acquired ? result.value : { reachable: true };
       };
     }
+
+    const innerPrices = inner.servicePrices;
+    if (innerPrices !== undefined) {
+      // Busy lock = "could not read the list", never an empty list (see Provider.servicePrices).
+      this.servicePrices = async (signal) => {
+        const result = await this.options.lock.withLock(`provider:${this.id}`, this.options.lockWaitMs, () =>
+          innerPrices.call(inner, signal),
+        );
+        return result.acquired ? result.value : undefined;
+      };
+    }
   }
 
   catalogue(): readonly CatalogueService[] {
@@ -80,6 +97,30 @@ export class GuardedProvider implements Provider {
   }
 
   async execute(request: ExecuteRequest): Promise<ProviderOutcome> {
+    if (this.options.isDisabled !== undefined) {
+      let disabled: boolean;
+      try {
+        disabled = await this.options.isDisabled(this.id, request.service.serviceId);
+      } catch {
+        // Cannot tell whether the price is still the one we sum: do not buy. Reported as our own
+        // refusal (`service_disabled`), not a transport error -- a database hiccup here must not
+        // count toward opening the supplier's circuit breaker.
+        return {
+          kind: 'failed',
+          reason: 'service_disabled',
+          detail: 'could not check whether this service is disabled',
+          notSent: true,
+        };
+      }
+      if (disabled) {
+        return {
+          kind: 'failed',
+          reason: 'service_disabled',
+          detail: 'service disabled after a supplier price change',
+          notSent: true,
+        };
+      }
+    }
     const now = (this.options.now ?? (() => new Date()))();
     const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     // The router wrote this call's own provider_calls row BEFORE execute, so `spent` already
