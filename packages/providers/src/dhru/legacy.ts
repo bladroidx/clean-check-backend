@@ -79,9 +79,7 @@ export class DhruLegacyProvider implements Provider {
           action: 'placeimeiorder',
           format: 'json',
           requestformat: 'json',
-          services: request.service.serviceId,
-          imei: request.imeiDigits,
-          reference: request.referenceId,
+          parameters: dhruParameters({ IMEI: request.imeiDigits, ID: request.service.serviceId }),
         },
         request.signal,
       );
@@ -105,7 +103,7 @@ export class DhruLegacyProvider implements Provider {
           action: 'getimeiorder',
           format: 'json',
           requestformat: 'json',
-          id: orderReference,
+          parameters: dhruParameters({ ID: orderReference }),
         },
         signal,
       );
@@ -265,4 +263,17 @@ function firstSuccess(envelope: DhruEnvelope): Record<string, unknown> | undefin
     if (nested !== undefined) return nested as Record<string, unknown>;
   }
   return outer;
+}
+
+/**
+ * The DHRU Fusion API takes an order's arguments in ONE form field, `parameters`: base64 of
+ * `<PARAMETERS><KEY>value</KEY>...</PARAMETERS>`. Top-level `imei` / `services` / `id` fields are
+ * ignored, and the supplier answers "Not Enough Parameters". The values here are digits and our own
+ * ids, but they are XML-escaped anyway so a reference can never break out of its element.
+ */
+export function dhruParameters(values: Record<string, string>): string {
+  const escape = (v: string) =>
+    v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const xml = Object.entries(values).map(([key, value]) => `<${key}>${escape(value)}</${key}>`).join('');
+  return Buffer.from(`<PARAMETERS>${xml}</PARAMETERS>`, 'utf8').toString('base64');
 }

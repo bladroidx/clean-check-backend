@@ -67,6 +67,45 @@ function execute(provider: DhruLegacyProvider) {
   });
 }
 
+/**
+ * The DHRU Fusion API reads an order's arguments from ONE field, `parameters`: base64 of
+ * `<PARAMETERS><IMEI>..</IMEI><ID>..</ID></PARAMETERS>`. Sent as top-level form fields they are
+ * ignored and the supplier answers "Not Enough Parameters" (seen from imei24 in production).
+ */
+function decodedParameters(body: string): string {
+  const parameters = new URLSearchParams(body).get('parameters');
+  expect(parameters, 'the form has a parameters field').not.toBeNull();
+  return Buffer.from(parameters ?? '', 'base64').toString('utf8');
+}
+
+describe('DHRU parameters encoding', () => {
+  it('places an order with the IMEI and service id in base64 XML parameters', async () => {
+    let sent = '';
+    agent
+      .get(BASE)
+      .intercept({ path: '/api/index.php', method: 'POST', body: (b) => ((sent = b), true) })
+      .reply(200, { SUCCESS: [{ ID: '1', STATUS: 'Available', RESULT: 'Blacklist Status: Clean' }] });
+
+    await execute(legacy());
+
+    expect(new URLSearchParams(sent).get('action')).toBe('placeimeiorder');
+    expect(decodedParameters(sent)).toBe(`<PARAMETERS><IMEI>${SENTINEL}</IMEI><ID>12</ID></PARAMETERS>`);
+  });
+
+  it('polls an order with its id in base64 XML parameters', async () => {
+    let sent = '';
+    agent
+      .get(BASE)
+      .intercept({ path: '/api/index.php', method: 'POST', body: (b) => ((sent = b), true) })
+      .reply(200, { SUCCESS: [{ ID: '77', STATUS: 'Available', RESULT: 'Blacklist Status: Clean' }] });
+
+    await legacy().poll('77', service, AbortSignal.timeout(5000));
+
+    expect(new URLSearchParams(sent).get('action')).toBe('getimeiorder');
+    expect(decodedParameters(sent)).toBe('<PARAMETERS><ID>77</ID></PARAMETERS>');
+  });
+});
+
 describe('legacy transport over HTTP', () => {
   it('posts the form and normalises the answer', async () => {
     agent
@@ -94,7 +133,7 @@ describe('legacy transport over HTTP', () => {
     // The number reaches the supplier in the request BODY. A query string would land in their
     // access logs, every proxy in between, and ours.
     expect(seenPath).not.toContain(SENTINEL);
-    expect(seenBody).toContain(SENTINEL);
+    expect(decodedParameters(seenBody)).toContain(SENTINEL); // inside DHRU's base64 `parameters`
   });
 
   it('maps 401 to auth_error rather than a generic outage', async () => {
