@@ -86,6 +86,7 @@ export function providerFeedbackRoutes(services: AppServices): FastifyPluginAsyn
             repos: services.repos,
             providers: services.providers,
             tacDirectory: app.tacDirectory,
+            learnTac: app.learnTac,
             metrics: services.metrics,
           },
           order,

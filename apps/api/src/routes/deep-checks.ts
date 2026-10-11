@@ -1,6 +1,6 @@
 import { CheckReport, CheckRequest, ErrorResponse } from '@imei-check/contract';
 import type { TacDirectory } from '@imei-check/identity';
-import { pollOrders } from '@imei-check/core';
+import { pollOrders, type TacObservation } from '@imei-check/core';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { OFFLINE_CAPABILITIES, runCheck } from '../orchestrator/run-check.js';
 import type { AppServices } from '../services.js';
@@ -96,6 +96,7 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
                   router: services.router,
                   cache: services.cache,
                   tacDirectory: app.tacDirectory,
+                  learnTac: app.learnTac,
                   metrics: services.metrics,
                   cipher: services.cipher,
                 },
@@ -113,7 +114,7 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
               );
               if (first.status !== 'partial') return first;
 
-              await waitForOrders(services, app.tacDirectory, first.check_id, budget, services.pollIntervalMs);
+              await waitForOrders(services, app.tacDirectory, app.learnTac, first.check_id, budget, services.pollIntervalMs);
               const record = await services.repos.checks.byId(ctx.tenant.id, first.check_id, 'deep');
               return record === undefined ? first : reportFromRecord(services, record);
             },
@@ -152,6 +153,7 @@ export function deepCheckRoutes(services: AppServices): FastifyPluginAsyncZod {
 async function waitForOrders(
   services: AppServices,
   tacDirectory: TacDirectory,
+  learnTac: (observation: TacObservation) => void,
   checkId: string,
   budget: AbortSignal,
   intervalMs: number,
@@ -160,7 +162,7 @@ async function waitForOrders(
     const open = await services.repos.orders.openForCheck(checkId);
     if (open.length === 0) return;
     const summary = await pollOrders(
-      { repos: services.repos, providers: services.providers, tacDirectory, metrics: services.metrics },
+      { repos: services.repos, providers: services.providers, tacDirectory, metrics: services.metrics, learnTac },
       open,
       { signal: budget, advanceBackoff: false },
     );

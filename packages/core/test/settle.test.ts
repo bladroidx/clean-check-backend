@@ -147,6 +147,36 @@ describe('pollDueOrders / pollOrders (shared order settlement)', () => {
     expect(cached?.value).toBe('clean');
   });
 
+  it('learns the device a paid answer names, under the check\'s TAC (ADR-0005 harvest)', async () => {
+    const repos = new MemoryRepositories();
+    await seed(repos, order());
+    const provider: Provider = {
+      id: 'imei24',
+      catalogue: () => [s486],
+      supports: () => s486,
+      execute: async () => ({ kind: 'failed', reason: 'timeout' }) as const,
+      poll: async () =>
+        ({
+          kind: 'answered',
+          fields: [
+            { field: 'blacklist.status', value: 'clean' },
+            { field: 'identity.manufacturer', value: 'Apple' },
+            { field: 'identity.model', value: 'iPhone 13' },
+          ],
+          misses: [],
+        }) as const,
+    };
+    const learned: string[] = [];
+
+    await pollOrders(
+      { repos, providers: [provider], tacDirectory: emptyTac, metrics: new Metrics(false), now, learnTac: (o) => learned.push(`${o.tac}=${o.model}`) },
+      [order()],
+    );
+
+    expect(await repos.tac.observed()).toEqual([{ tac: '35310411', manufacturer: 'Apple', model: 'iPhone 13' }]);
+    expect(learned).toEqual(['35310411=iPhone 13']);
+  });
+
   it('settles a pre-migration order with no stored imeiHash normally, but skips the cache write', async () => {
     const repos = new MemoryRepositories();
     const noHash = order({ imeiHash: '' });
