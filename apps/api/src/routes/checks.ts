@@ -60,6 +60,7 @@ export function checkRoutes(services: AppServices): FastifyPluginAsyncZod {
                 repos: services.repos,
                 cache: services.cache,
                 tacDirectory: app.tacDirectory,
+                learnTac: app.learnTac,
                 metrics: services.metrics,
                 cipher: services.cipher,
               },

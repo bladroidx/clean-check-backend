@@ -236,6 +236,21 @@ export interface ImeiRevealRepo {
   forCheck(checkId: string): Promise<readonly ImeiRevealRecord[]>;
 }
 
+/** A `(TAC -> device)` fact harvested from a paid supplier answer (ADR-0005, "harvest our own"). */
+export interface TacObservation {
+  readonly tac: string;
+  readonly manufacturer: string;
+  readonly model: string;
+  readonly seenAt: Date;
+}
+
+/** `tac_entries`, as far as harvesting needs it: write an observation, read every observation back. */
+export interface TacRepo {
+  /** Inserts or refreshes the row; never replaces a row of higher source priority. */
+  recordObservation(observation: TacObservation): Promise<void>;
+  observed(): Promise<readonly { tac: string; manufacturer: string; model: string }[]>;
+}
+
 export interface Repositories {
   readonly tenants: TenantRepo;
   readonly apiKeys: ApiKeyRepo;
@@ -246,5 +261,6 @@ export interface Repositories {
   readonly idempotency: IdempotencyRepo;
   readonly locks: ProviderLock;
   readonly reveals: ImeiRevealRepo;
+  readonly tac: TacRepo;
   close(): Promise<void>;
 }

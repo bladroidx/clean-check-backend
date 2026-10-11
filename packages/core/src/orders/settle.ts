@@ -2,7 +2,8 @@ import { deriveVerdict, unavailable, type Capability, type SectionResult } from 
 import type { TacDirectory } from '@imei-check/identity';
 import { capabilityOf, type FieldValue, type Provider, type ProviderOutcome } from '@imei-check/providers';
 import { FieldCache } from '../cache/store.js';
-import type { OrderRow, Repositories } from '../db/types.js';
+import type { OrderRow, Repositories, TacObservation } from '../db/types.js';
+import { harvestTac } from '../tac/harvest.js';
 import type { Metrics } from '../metrics.js';
 import { coverageFor } from '../report/coverage.js';
 import { assembleSection, deriveWarrantyStatus } from '../report/assemble.js';
@@ -36,6 +37,8 @@ export interface SettleDeps {
   readonly metrics: Metrics;
   readonly now?: () => Date;
   readonly log?: (event: Record<string, unknown>, message: string) => void;
+  /** Called with each `(TAC -> device)` this process harvests, so its free tier answers it at once. */
+  readonly learnTac?: (observation: TacObservation) => void;
 }
 
 export interface PollSummary {
@@ -207,6 +210,8 @@ export async function settleOrder(
     settledAt: at,
   });
 
+  if (outcome.kind === 'answered') await harvestQuietly(deps, order, outcome.fields, at);
+
   if (order.capability === 'warranty.purchase_date') {
     const purchase =
       outcome.kind === 'answered'
@@ -216,6 +221,24 @@ export async function settleOrder(
   }
 
   await refreshCheck(deps, order.checkId, at);
+}
+
+/**
+ * Learns the device a paid answer names (ADR-0005). Best-effort: a failed harvest must never undo or
+ * delay settling the order the customer is waiting on, so it is logged and dropped.
+ */
+async function harvestQuietly(
+  deps: SettleDeps,
+  order: OrderRow,
+  fields: readonly FieldValue[],
+  at: Date,
+): Promise<void> {
+  try {
+    const check = await deps.repos.checks.byId(order.tenantId, order.checkId);
+    await harvestTac(deps.repos.tac, check?.tac, fields, at, deps.learnTac);
+  } catch (error) {
+    deps.log?.({ order_id: order.id, error: String(error) }, 'tac harvest failed');
+  }
 }
 
 /**

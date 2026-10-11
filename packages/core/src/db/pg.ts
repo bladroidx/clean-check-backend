@@ -11,6 +11,8 @@ import type {
   IdempotencyRepo,
   ImeiRevealRecord,
   ImeiRevealRepo,
+  TacObservation,
+  TacRepo,
   OrderRepo,
   OrderRow,
   ProviderCallRepo,
@@ -153,6 +155,7 @@ export class PgRepositories implements Repositories {
   readonly idempotency: IdempotencyRepo;
   readonly locks: ProviderLock;
   readonly reveals: ImeiRevealRepo;
+  readonly tac: TacRepo;
 
   constructor(private readonly pool: pg.Pool) {
     this.tenants = new PgTenantRepo(pool);
@@ -164,6 +167,7 @@ export class PgRepositories implements Repositories {
     this.idempotency = new PgIdempotencyRepo(pool);
     this.locks = new PgProviderLock(pool);
     this.reveals = new PgImeiRevealRepo(pool);
+    this.tac = new PgTacRepo(pool);
   }
 
   async close(): Promise<void> {
@@ -733,3 +737,29 @@ class PgImeiRevealRepo implements ImeiRevealRepo {
   }
 }
 
+/**
+ * Harvested `(TAC -> device)` rows in `tac_entries` (ADR-0005). An observation replaces an imported
+ * row (osmocom 10, paid 50) or an older observation, but the priority guard keeps any future
+ * higher-priority source from being overwritten.
+ */
+class PgTacRepo implements TacRepo {
+  constructor(private readonly pool: pg.Pool) {}
+  async recordObservation(o: TacObservation): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO tac_entries (tac, manufacturer, model, source, source_priority, source_version, first_seen, last_seen)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+       ON CONFLICT (tac) DO UPDATE SET
+         manufacturer = EXCLUDED.manufacturer, model = EXCLUDED.model, source = EXCLUDED.source,
+         source_priority = EXCLUDED.source_priority, source_version = EXCLUDED.source_version,
+         last_seen = EXCLUDED.last_seen
+       WHERE tac_entries.source_priority <= EXCLUDED.source_priority`,
+      [o.tac, o.manufacturer, o.model, 'observed', 100, 'harvest', o.seenAt],
+    );
+  }
+  async observed(): Promise<readonly { tac: string; manufacturer: string; model: string }[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT tac, manufacturer, model FROM tac_entries WHERE source = 'observed'`,
+    );
+    return rows.map((row) => ({ tac: String(row['tac']), manufacturer: String(row['manufacturer']), model: String(row['model']) }));
+  }
+}

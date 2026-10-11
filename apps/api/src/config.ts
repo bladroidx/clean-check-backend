@@ -23,7 +23,7 @@ const MIN_PEPPER_BYTES = 32;
  * An explicitly configured relative path stays relative to the cwd, as an operator would expect.
  */
 const DEFAULT_TAC_SOURCE_FILE = fileURLToPath(
-  new URL('../../../testdata/tac-seed.json', import.meta.url),
+  new URL('../../../data/tac/tac-directory.json', import.meta.url),
 );
 
 /** Same reasoning as the TAC seed path: identical from `apps/api/src` and `apps/api/dist`. */

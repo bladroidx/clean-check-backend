@@ -28,7 +28,8 @@ import type { Repositories } from '@imei-check/core';
 import { assembleSection, deriveWarrantyStatus } from '@imei-check/core';
 import { coverageFor } from '@imei-check/core';
 import { identityCoverage } from '@imei-check/core';
-import type { ImeiCipher } from '@imei-check/core';
+import type { ImeiCipher, TacObservation } from '@imei-check/core';
+import { harvestTac } from '@imei-check/core';
 
 /**
  * One check, end to end, in one of two tiers.
@@ -64,6 +65,8 @@ export interface RunCheckDeps {
   /** ADR-0007: encrypts the IMEI before it is ever persisted -- required for both tiers. */
   readonly cipher: ImeiCipher;
   readonly now?: () => Date;
+  /** Teaches the free tier a device a paid answer names (ADR-0005). */
+  readonly learnTac?: (observation: TacObservation) => void;
 }
 
 export interface RunCheckRequest {
@@ -380,6 +383,8 @@ async function resolvePaid(args: {
     // Cache whatever we actually learned, even from a section that did not pass. Once per CALL:
     // each field is written once, under its own capability's coverage.
     if (outcome.kind === 'answered') {
+      // Best-effort: learning the device must never fail the paid check the caller is waiting on.
+      await harvestTac(deps.repos.tac, tac, outcome.fields, startedAt, deps.learnTac).catch(() => undefined);
       const byCapability = new Map<Capability, FieldValue[]>();
       for (const field of outcome.fields) {
         const owner = capabilityOf(field.field);

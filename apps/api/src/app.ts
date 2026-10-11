@@ -8,7 +8,8 @@ import {
   type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
 import type { Logger } from 'pino';
-import type { InMemoryTacDirectory } from '@imei-check/identity';
+import { LearningTacDirectory, type TacDirectory } from '@imei-check/identity';
+import type { TacObservation } from '@imei-check/core';
 import { healthRoutes, type DatabaseProbe } from './routes/health.js';
 import { imeiRoutes } from './routes/imei.js';
 import { tacRoutes } from './routes/tac.js';
@@ -22,13 +23,18 @@ import { refreshCircuitGauge, type AppServices } from './services.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
-    tacDirectory: InMemoryTacDirectory;
+    tacDirectory: LearningTacDirectory;
+    /** Teaches this process's free tier a device harvested from a paid answer (ADR-0005). */
+    learnTac: (observation: TacObservation) => void;
   }
 }
 
+/** How often the free tier reloads devices learned by other processes (the worker settles async orders). */
+export const LEARNED_TAC_REFRESH_MS = 5 * 60_000;
+
 export interface AppDeps {
   logger: Logger;
-  tacDirectory: InMemoryTacDirectory;
+  tacDirectory: TacDirectory;
   /**
    * The paid path. Absent means the free offline tier only -- which is a supported mode, not a
    * degraded one: it costs nothing to run and is genuinely useful (milestone M0).
@@ -53,7 +59,30 @@ export async function buildApp(deps: AppDeps) {
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
-  app.decorate('tacDirectory', deps.tacDirectory);
+  // Imported directory + devices learned from paid answers. Learned rows load at startup, refresh on
+  // a timer (the worker learns too), and arrive instantly when this process harvests one itself.
+  const directory = new LearningTacDirectory(deps.tacDirectory);
+  app.decorate('tacDirectory', directory);
+  app.decorate('learnTac', (o: TacObservation) => {
+    directory.learn(o.tac, { manufacturer: o.manufacturer, model: o.model, source: 'observed' });
+  });
+  const tacRepo = deps.services?.repos.tac;
+  if (tacRepo !== undefined) {
+    const reload = async () => {
+      try {
+        const rows = await tacRepo.observed();
+        directory.replaceLearned(
+          rows.map((r) => [r.tac, { manufacturer: r.manufacturer, model: r.model, source: 'observed' as const }] as const),
+        );
+      } catch (error) {
+        app.log.warn({ error: String(error) }, 'could not load learned TAC entries; keeping the previous set');
+      }
+    };
+    app.addHook('onReady', reload);
+    const timer = setInterval(() => void reload(), LEARNED_TAC_REFRESH_MS);
+    timer.unref();
+    app.addHook('onClose', async () => clearInterval(timer));
+  }
 
   await app.register(swagger, {
     openapi: {

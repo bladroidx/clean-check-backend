@@ -76,6 +76,31 @@ describe('paid /v1/deep_checks', () => {
   });
 });
 
+describe('learning devices from paid answers (ADR-0005)', () => {
+  it('after a deep check names an unknown TAC, the free check names it too', async () => {
+    const named: ProviderOutcome = {
+      kind: 'answered',
+      fields: [
+        { field: 'blacklist.status', value: 'clean' },
+        { field: 'identity.manufacturer', value: 'Honor' },
+        { field: 'identity.model', value: 'Magic8 Pro' },
+      ],
+      misses: [],
+    };
+    const h = await makePaidApp({ providers: [new FakeProvider('fake', named)] });
+
+    const before = (await post(h, '/v1/checks', { imei: UNKNOWN_TAC_IMEI })).json<CheckReport>();
+    expect(before.sections['identity.model']?.outcome).not.toBe('pass');
+
+    expect((await post(h, '/v1/deep_checks', { imei: UNKNOWN_TAC_IMEI })).statusCode).toBe(200);
+
+    const after = (await post(h, '/v1/checks', { imei: UNKNOWN_TAC_IMEI })).json<CheckReport>();
+    expect(after.sections['identity.model']?.outcome).toBe('pass');
+    expect(JSON.stringify(after.sections['identity.model'])).toContain('Magic8 Pro');
+    expect((await h.repos.tac.observed()).map((o) => o.model)).toEqual(['Magic8 Pro']);
+  });
+});
+
 describe('wait window and hand-off', () => {
   it('a pending order that answers inside the window is returned final', async () => {
     const provider = new FakeProvider('fake', { kind: 'pending', orderReference: 'o1' },

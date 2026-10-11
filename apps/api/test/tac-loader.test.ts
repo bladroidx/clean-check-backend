@@ -99,3 +99,17 @@ describe('loadTacDirectory', () => {
     }
   });
 });
+
+describe('the default TAC directory (ADR-0005: Osmocom, attributed)', () => {
+  it('is the Osmocom import, not the six-row development seed', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    const config = loadConfig({ SERVER_PEPPER: 'p'.repeat(32) } as NodeJS.ProcessEnv);
+    expect(config.TAC_SOURCE_FILE).toMatch(/data\/tac\/tac-directory\.json$/);
+
+    const dir = loadTacDirectory(config.TAC_SOURCE_FILE);
+    expect(dir.size).toBeGreaterThan(20_000);
+    expect(dir.version).toMatch(/^osmocom-\d{4}-\d{2}-\d{2}$/);
+    expect(dir.attribution).toContain('CC BY-SA 3.0');
+    expect(dir.lookup('86124503')).toMatchObject({ manufacturer: 'Honor', model: 'TIT-L01', source: 'osmocom' });
+  });
+});

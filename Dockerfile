@@ -24,6 +24,8 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/packages ./packages
 COPY --from=build --chown=node:node /app/apps ./apps
 COPY --from=build --chown=node:node /app/testdata ./testdata
+# The free tier's TAC directory (Osmocom, CC BY-SA 3.0; rebuild with npm run tac:build).
+COPY --from=build --chown=node:node /app/data ./data
 # Operator scripts (seed:service-tenant, seed:admin-key, imei:reveal) run inside this container on
 # the host; they import only production dependencies and apps/api/dist.
 COPY --from=build --chown=node:node /app/scripts ./scripts

@@ -17,6 +17,8 @@ import type {
   ProviderLock,
   Repositories,
   StoredSection,
+  TacObservation,
+  TacRepo,
   Tenant,
   TenantRepo,
 } from './types.js';
@@ -41,6 +43,7 @@ export class MemoryRepositories implements Repositories {
   readonly idempotency = new MemoryIdempotencyRepo();
   readonly locks = new MemoryProviderLock();
   readonly reveals = new MemoryImeiRevealRepo();
+  readonly tac = new MemoryTacRepo();
 
   async close(): Promise<void> {}
 }
@@ -286,3 +289,12 @@ class MemoryIdempotencyRepo implements IdempotencyRepo {
   }
 }
 
+class MemoryTacRepo implements TacRepo {
+  private readonly rows = new Map<string, TacObservation>();
+  async recordObservation(observation: TacObservation): Promise<void> {
+    this.rows.set(observation.tac, observation);
+  }
+  async observed(): Promise<readonly { tac: string; manufacturer: string; model: string }[]> {
+    return [...this.rows.values()].map(({ tac, manufacturer, model }) => ({ tac, manufacturer, model }));
+  }
+}
