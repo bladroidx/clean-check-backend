@@ -239,7 +239,23 @@ as `${VAR:?}`, so a deploy with a missing secret fails before anything starts.
 
 ## 8. Not done yet
 
-- **Production is not configured.** The Coolify `production` environment exists but is empty.
+- **Production deploys from CI once its one-time setup is done.** `promote` fast-forwards `release`;
+  `.github/workflows/deploy-production.yml` then runs (after a successful promote, or by hand from
+  `release`) and SSHes to the VM with a production-only key whose forced command is
+  `deploy/coolify-deploy-production.sh`. One-time setup:
+  1. Coolify → `production` environment → new compose app from `bladroidx/clean-check-backend`, branch
+     **`release`**, `docker-compose.prod.yml`, with its own secrets (never staging's pepper or keys).
+  2. On the VM: `echo <app uuid> | sudo tee /etc/coolify-deploy/imei-check-production.uuid` and
+     `sudo install -m 755 deploy/coolify-deploy-production.sh /usr/local/bin/coolify-deploy-production`.
+     The Coolify token in `/etc/coolify-deploy/token` needs deploy rights on the production app too.
+  3. A new deploy key just for production, in `~/.ssh/authorized_keys`:
+     `restrict,command="/usr/local/bin/coolify-deploy-production" ssh-ed25519 AAAA… github-actions-production-deploy`
+  4. GitHub → Settings → Environments → `production`: secret `PRODUCTION_DEPLOY_KEY` (that key's private
+     half), variables `PRODUCTION_SSH_TARGET` and `PRODUCTION_SSH_KNOWN_HOSTS` (same VM as staging).
+  5. Point the trustmob backend's production `IMEI_CHECK_*` at the production api, not staging.
+
+  Until then the Coolify `production` environment is empty and the workflow fails with a message
+  naming what is missing.
   Setting it up means:
   - a second compose app tracking `release`, with its own domain,
   - its **own** secrets and `seed:service-tenant` key,

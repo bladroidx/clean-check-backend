@@ -1,0 +1,44 @@
+name: deploy-production
+
+# Deploys `release` to production after `promote` has fast-forwarded it. promote pushes with the
+# workflow's own token, and GitHub does not start workflows from such pushes, so this follows the
+# promote RUN rather than the push. Same shape as deploy-staging: Coolify stays private; the job can
+# only SSH to the VM with a key that authorized_keys pins to deploy/coolify-deploy-production.sh,
+# which calls Coolify on localhost and waits for the stack to be running and healthy.
+on:
+  workflow_run:
+    workflows: [promote]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # A successful promote, or a manual run from the release branch -- never anything else.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release') ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Its own GitHub environment: production secrets, and (optionally) required reviewers.
+    environment: production
+    steps:
+      - name: Deploy through the VM's forced command
+        env:
+          DEPLOY_KEY: ${{ secrets.PRODUCTION_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ vars.PRODUCTION_SSH_KNOWN_HOSTS }}
+          SSH_TARGET: ${{ vars.PRODUCTION_SSH_TARGET }}
+        run: |
+          [ -n "$DEPLOY_KEY" ] && [ -n "$KNOWN_HOSTS" ] && [ -n "$SSH_TARGET" ] \
+            || { echo "::error::production environment is missing PRODUCTION_DEPLOY_KEY / PRODUCTION_SSH_KNOWN_HOSTS / PRODUCTION_SSH_TARGET (deploy-info.md section 8)"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy -o BatchMode=yes -o StrictHostKeyChecking=yes "$SSH_TARGET"
