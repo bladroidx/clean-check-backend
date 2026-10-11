@@ -77,6 +77,19 @@ export function parseReference(reference, now = Date.now()) {
 }
 
 /** Decides a reply. Pure apart from the fixture reader, so the tests drive it directly. */
+/**
+ * A DHRU order argument: real DHRU reads `<PARAMETERS><KEY>value</KEY></PARAMETERS>` from the base64
+ * `parameters` field and ignores top-level `imei` / `services` / `id` (answering "Not Enought
+ * Parameters", imei24's spelling). The fake does the same, so a client that sends the wrong shape fails here
+ * exactly as it does against the real supplier.
+ */
+function dhruParameter(form, key) {
+  const raw = form.get('parameters');
+  if (!raw) return undefined;
+  const xml = Buffer.from(raw, 'base64').toString('utf8');
+  return xml.match(new RegExp(`<${key}>([^<]*)</${key}>`))?.[1];
+}
+
 export function reply(form, { readFixture, now = Date.now(), username, apiKey }) {
   const json = (body, status = 200) => ({ status, body });
   const error = (message) => json(`{"ERROR":[{"MESSAGE":"${message}"}]}`);
@@ -93,7 +106,11 @@ export function reply(form, { readFixture, now = Date.now(), username, apiKey })
       };
 
     case 'placeimeiorder': {
-      const scenario = scenarioOf(form.get('imei'));
+      const imei = dhruParameter(form, 'IMEI');
+      if (imei === undefined || dhruParameter(form, 'ID') === undefined) {
+        return { ...error('Not Enought Parameters'), log: 'place: no parameters' };
+      }
+      const scenario = scenarioOf(imei);
       if (scenario === undefined) return { ...error('Invalid IMEI'), log: 'place: invalid imei' };
       const s = SCENARIOS[scenario];
       if (s.status !== undefined) return { status: s.status, body: '', log: `place scenario=${scenario} -> HTTP ${s.status}` };
@@ -108,7 +125,8 @@ export function reply(form, { readFixture, now = Date.now(), username, apiKey })
     }
 
     case 'getimeiorder': {
-      const reference = form.get('id');
+      const reference = dhruParameter(form, 'ID');
+      if (reference === undefined) return { ...error('Not Enought Parameters'), log: 'poll: no parameters' };
       const parsed = parseReference(reference, now);
       const s = parsed && SCENARIOS[parsed.scenario];
       if (s?.poll === undefined) return { ...error('Order not found'), log: `poll ref=${reference}: not found` };

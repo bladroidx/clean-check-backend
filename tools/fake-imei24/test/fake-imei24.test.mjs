@@ -10,6 +10,11 @@ const FIXTURES = join(import.meta.dirname, '..', '..', '..', 'packages', 'provid
 const readFixture = (name) => readFileSync(join(FIXTURES, name), 'utf8').trimEnd();
 const opts = (now = Date.now()) => ({ readFixture, now, username: 'u', apiKey: 'k' });
 const form = (fields) => new URLSearchParams({ username: 'u', apiaccesskey: 'k', ...fields });
+// Real DHRU: an order's arguments travel as base64 XML in one `parameters` field.
+const params = (values) =>
+  Buffer.from(`<PARAMETERS>${Object.entries(values).map(([k, v]) => `<${k}>${v}</${k}>`).join('')}</PARAMETERS>`).toString('base64');
+const place = (imei) => form({ action: 'placeimeiorder', parameters: params({ IMEI: imei, ID: '12' }) });
+const poll = (id) => form({ action: 'getimeiorder', parameters: params({ ID: id }) });
 
 // Luhn over all 15 digits, written independently of imei-for.mjs.
 const luhnValid = (imei) =>
@@ -33,23 +38,23 @@ test('a wrong key is refused', () => {
 });
 
 test('instant scenarios answer from their fixture verbatim', () => {
-  const r = reply(form({ action: 'placeimeiorder', imei: imeiFor('0') }), opts());
+  const r = reply(place(imeiFor('0')), opts());
   assert.equal(r.body, readFixture('imei24/blacklist-blacklisted.json'));
-  assert.equal(reply(form({ action: 'placeimeiorder', imei: imeiFor('9') }), opts()).status, 429);
-  assert.equal(reply(form({ action: 'placeimeiorder', imei: imeiFor('4') }), opts()).sleepMs, 15_000);
+  assert.equal(reply(place(imeiFor('9')), opts()).status, 429);
+  assert.equal(reply(place(imeiFor('4')), opts()).sleepMs, 15_000);
 });
 
 test('an async order is pending until its delay passes, then answered', () => {
   const placedAt = Date.now();
-  const placed = reply(form({ action: 'placeimeiorder', imei: imeiFor('1') }), opts(placedAt));
+  const placed = reply(place(imeiFor('1')), opts(placedAt));
   const reference = JSON.parse(placed.body).SUCCESS[0].REFERENCEID;
   assert.match(reference, /^\d{10}$/); // under the 14-digit IMEI tripwire
 
-  const early = reply(form({ action: 'getimeiorder', id: reference }), opts(placedAt + 1_000));
+  const early = reply(poll(reference), opts(placedAt + 1_000));
   assert.equal(JSON.parse(early.body).SUCCESS[0].STATUS, 'Pending');
   assert.equal(JSON.parse(early.body).SUCCESS[0].ID, reference);
 
-  const late = reply(form({ action: 'getimeiorder', id: reference }), opts(placedAt + ASYNC_MS[1] + 1_000));
+  const late = reply(poll(reference), opts(placedAt + ASYNC_MS[1] + 1_000));
   assert.equal(late.body, readFixture('imei24/blacklist-blacklisted.json'));
 });
 
@@ -60,5 +65,10 @@ test('references are unique within a second and round-trip', () => {
   assert.notEqual(a, b);
   assert.equal(parseReference(a, now + 5_000).scenario, 6);
   assert.ok(Math.abs(parseReference(a, now + 5_000).ageMs - 5_000) <= 1_000);
-  assert.equal(reply(form({ action: 'getimeiorder', id: 'garbage' }), opts()).body, '{"ERROR":[{"MESSAGE":"Order not found"}]}');
+  assert.equal(reply(poll('garbage'), opts()).body, '{"ERROR":[{"MESSAGE":"Order not found"}]}');
+});
+
+test('top-level imei/services fields are not DHRU: the order is refused like the real supplier does', () => {
+  const r = reply(form({ action: 'placeimeiorder', services: '12', imei: imeiFor('0') }), opts());
+  assert.equal(r.body, '{"ERROR":[{"MESSAGE":"Not Enought Parameters"}]}');
 });

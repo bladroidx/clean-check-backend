@@ -76,7 +76,8 @@ describe('imei24 via the real DHRU legacy adapter', () => {
 
     // Placed once, then polled by the id the placement returned -- not re-bought, not dropped.
     expect(forms.map((f) => f.get('action'))).toEqual(['placeimeiorder', 'getimeiorder']);
-    expect(forms[1]?.get('id')).toBe('71970');
+    // DHRU carries the order id inside the base64 XML `parameters`, not as a top-level field.
+    expect(Buffer.from(forms[1]?.get('parameters') ?? '', 'base64').toString('utf8')).toBe('<PARAMETERS><ID>71970</ID></PARAMETERS>');
     expect((h.repos as MemoryRepositories).providerCalls.rows.size).toBe(1);
 
     // The poll's answer settled the section: "Blacklisted" is a known-bad value.
